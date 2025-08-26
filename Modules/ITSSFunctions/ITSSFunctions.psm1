@@ -547,17 +547,11 @@ function Get-ADPrinters {
     $results = @()
     $printers = $Servers | ForEach-Object -Parallel { Get-Printer -ComputerName $_ | Sort-Object | Select-Object Name }
     $props = ('whenCreated', 'ServerName', 'Description', 'Location', 'PortName')
-
-    # Initialize confirmation prompt to close Excel
-    $title = 'Excel must be closed before exporting the data.'
-    $message = 'Do you want to continue with this operation?'
-    $options = '&Yes', '&No' # & makes the letter a hotkey
-    $defaultOption = 1
     
     if ($CreatedMonthsAgo) {
         $WorkSheetName = 'Last {0} Months' -f $CreatedMonthsAgo
         foreach ($printer in $printers) {
-            $filter = "ObjectClass -like 'printQueue' -and Name -like '*" + $printer.Name + "*'"
+            $filter = "ObjectClass -like 'printQueue' -and Name -like '*$($printer.Name)*'"
             $printerObj = Get-ADObject -Filter $filter -Server $Domain -Properties $props | Where-Object whenCreated -GT (Get-Date).AddMonths("-$CreatedMonthsAgo").Date
             if ($printerObj.whenCreated -gt (Get-Date).AddMonths("-$CreatedMonthsAgo").Date) {
                 $results += [PSCustomObject]@{
@@ -571,14 +565,7 @@ function Get-ADPrinters {
             }
         }
 
-        $excel = Get-Process -Name '*excel*'
-        if ($excel) {
-            # Prompt to close Excel for the export.
-            $choice = $Host.UI.PromptForChoice($title, $message, $options, $defaultOption)
-            if ($choice -eq 0) { 
-                $excel | Stop-Process -Force
-            } else { Write-Host 'Operation cancelled.' }
-        }
+        Stop-ExcelProcess
         $results | Export-Excel -Path "$env:HOMEPATH\Documents\AD_Printer_Export.xlsx" -WorksheetName $WorkSheetName -AutoSize -TableName $WorkSheetName -ClearSheet
         Write-Host "Output saved to $env:HOMEPATH\Documents\AD_Printer_Export.xlsx"
     } elseif ($CreatedAfter) {
@@ -598,14 +585,7 @@ function Get-ADPrinters {
             }
         }
 
-        $excel = Get-Process -Name '*excel*'
-        if ($excel) {
-            # Prompt to close Excel for the export.
-            $choice = $Host.UI.PromptForChoice($title, $message, $options, $defaultOption)
-            if ($choice -eq 0) { 
-                $excel | Stop-Process -Force
-            } else { Write-Host 'Operation cancelled.' }
-        }
+        Stop-ExcelProcess
         $results | Export-Excel -Path "$env:HOMEPATH\Documents\AD_Printer_Export.xlsx" -WorksheetName $WorkSheetName -AutoSize -TableName $WorkSheetName -ClearSheet
         Write-Host "Output saved to $env:HOMEPATH\Documents\AD_Printer_Export.xlsx"
     } else {
@@ -623,14 +603,7 @@ function Get-ADPrinters {
                 }
             }
         }
-        $excel = Get-Process -Name '*excel*'
-        if ($excel) {
-            # Prompt to close Excel for the export.
-            $choice = $Host.UI.PromptForChoice($title, $message, $options, $defaultOption)
-            if ($choice -eq 0) { 
-                $excel | Stop-Process -Force
-            } else { Write-Host 'Operation cancelled.' }
-        }
+        Stop-ExcelProcess
         $results | Export-Excel -Path "$env:HOMEPATH\Documents\AD_Printer_Export.xlsx" -WorksheetName 'All Printers' -AutoSize -TableName 'All Printers' -ClearSheet
         Write-Host "Output saved to $env:HOMEPATH\Documents\AD_Printer_Export.xlsx"
     }
