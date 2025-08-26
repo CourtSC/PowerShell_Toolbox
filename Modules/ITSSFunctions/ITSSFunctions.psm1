@@ -7,100 +7,455 @@ if (-not (Get-Module -ListAvailable -Name 'ImportExcel')) {
 # Use Type Accelerator to allow PSSession type.
 [PowerShell].Assembly.GetType('System.Management.Automation.TypeAccelerators')::add('PSSession', 'System.Management.Automation.Runspaces.PSSession')
 
-function Get-ExcelProcess {
+function Stop-ExcelProcess {
     <#
     .SYNOPSIS
-    Prompts the user to close any running Excel processes before continuing with an operation that requires Excel to be closed.
-    
+    Stops any running Microsoft Excel processes, with optional confirmation and WhatIf support.
+
     .DESCRIPTION
-    The Get-ExcelProcess function checks for any active Microsoft Excel processes on the system. If any are found, it prompts the user with a confirmation dialog asking whether to forcefully close Excel. This is useful in scenarios where Excel must be closed before proceeding with tasks such as exporting data to an Excel file.
+    Stop-ExcelProcess detects running instances of Microsoft Excel and stops them. By default, if Excel is running,
+    the function prompts for confirmation using ShouldContinue. You can bypass the prompt with -Force, or rely on
+    PowerShell’s standard -WhatIf / -Confirm behavior via SupportsShouldProcess.
 
-    If the user chooses Yes, all running Excel processes are terminated. If the user selects No, the operation is canceled.
+    The function returns a Boolean indicating the outcome:
+    - $true  : Excel was not running or was successfully stopped.
+    - $false : The user cancelled or an error occurred while stopping Excel.
 
-    .EXAMPLE
-    Prompt to close Excel
+    .PARAMETER Force
+    Skips the interactive confirmation prompt and attempts to stop Excel immediately. Still respects -WhatIf/-Confirm.
 
-    Get-ExcellProcess
-
-    This command checks for running Excel processes and prompts the user to close them. If the user agrees, Excel is forcefully closed.
+    .INPUTS
+    None. You cannot pipe input to this function.
 
     .OUTPUTS
-    - Displays a confirmation prompt if Excel is running.
-    - Outputs a cancellation message if the user chooses not to proceed.
+    System.Boolean
+    Returns $true on success (or when Excel is already closed), $false on cancellation or error.
+
+    .EXAMPLE
+    PS> Stop-ExcelProcess
+    Prompts to close running Excel processes, then stops them if confirmed.
+
+    .EXAMPLE
+    PS> Stop-ExcelProcess -Force
+    Immediately stops any running Excel processes without prompting.
+
+    .EXAMPLE
+    PS> Stop-ExcelProcess -WhatIf
+    Shows what would happen if the function ran, without making changes.
 
     .NOTES
-    - This function uses Get-Process to detect Excel instances and Stop-Process -Force to terminate them.
-    - The prompt uses PromptForChoice to provide a user-friendly decision dialog.
-    - The hotkey & in the options allows keyboard shortcuts for selection.
+    Requires Windows when targeting Microsoft Excel as a desktop application.
+    Uses Get-Process 'EXCEL' and Stop-Process -Force.
+    Integrates with -WhatIf and -Confirm via SupportsShouldProcess.
+
+    .LINK
+    about_Comment_Based_Help
+    .LINK
+    about_CommonParameters
     #>
 
-    [CmdletBinding()]
-    param (
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    [OutputType([bool])]
+    param(
         [Parameter()]
-        [switch]
-        $Force
+        [switch]$Force
     )
 
-    # Initialize confirmation prompt to close Excel
-    $title = 'Excel must be closed before exporting the data.'
-    $message = 'Do you want to continue with this operation?'
-    $options = '&Yes', '&No' # & makes the letter a hotkey
-    $defaultOption = 1
+    # Detect Excel processes safely
+    $procs = Get-Process -Name 'EXCEL' -ErrorAction SilentlyContinue
 
-    $excel = Get-Process -Name '*excel*'
-    if ($excel) {
-        # Prompt to close Excel for the export.
-        $choice = $Host.UI.PromptForChoice($title, $message, $options, $defaultOption)
-        if (($choice -eq 0) -or ($Force)) {
-            $excel | Stop-Process -Force
-        } else { Write-Host 'Operation cancelled.' }
+    if (-not $procs) {
+        Write-Verbose 'No Excel processes found.'
+        return $true
+    }
+
+    Write-Verbose ('Detected {0} Excel process(es): {1}' -f $procs.Count, ($procs.Id -join ', '))
+
+    # Optional friendly prompt unless -Force
+    if (-not $Force) {
+        $caption = 'Excel must be closed before continuing.'
+        $message = "Found $($procs.Count) Excel process(es). Close them now?"
+        if (-not $PSCmdlet.ShouldContinue($message, $caption)) {
+            Write-Verbose 'Operation cancelled by user.'
+            return $false
+        }
+    }
+
+    # Respect -WhatIf / -Confirm
+    if ($PSCmdlet.ShouldProcess("Excel ($($procs.Count))", 'Stop-Process -Force')) {
+        try {
+            $procs | Stop-Process -Force -ErrorAction Stop
+            Write-Verbose 'Successfully closed Excel.'
+            return $true
+        } catch {
+            Write-Error -ErrorRecord $_
+            return $false
+        }
     }
 }
 
 function Get-InstalledPrinters {
-    [CmdletBinding(DefaultParameterSetName = 'Session')]
+    <#
+    .SYNOPSIS
+    Lists per-user printer connections from one or more computers or PSSessions.
+
+    .DESCRIPTION
+    Enumerates registry keys under HKEY_USERS\<SID>\Printers\Connections on the target system(s) to report
+    installed (connected) printers for each user profile. Works against:
+    - One or more computer names via PowerShell remoting, or
+    - One or more existing PSSessions.
+
+    For each connection, returns a structured object with ComputerName, SID, (optionally) resolved User name,
+    and the connection name (Printer).
+
+    .PARAMETER ComputerName
+    One or more remote computer names to query via PowerShell remoting. Accepts pipeline input.
+    Requires WinRM connectivity and appropriate permissions.
+
+    .PARAMETER Session
+    One or more existing PSSessions to use for the query. Accepts pipeline input.
+
+    .PARAMETER ResolveUser
+    When specified, attempts to resolve each SID to an NTAccount (DOMAIN\User). If resolution fails,
+    the SID is returned as-is.
+
+    .PARAMETER ThrottleLimit
+    Maximum number of concurrent remote calls when using -ComputerName. Default is 16.
+
+    .PARAMETER Credential
+    Specifies a user account that has permission to run the command on the remote computer(s).
+    Only applicable with -ComputerName. When defined with the [Credential()] attribute and supplied
+    without a value, you will be prompted for credentials.
+
+    .INPUTS
+    System.String, Microsoft.PowerShell.Commands.PSSession
+    You can pipe computer names or PSSession objects.
+
+    .OUTPUTS
+    System.Management.Automation.PSCustomObject
+    Each object includes: ComputerName, SID, User (if -ResolveUser), and Printer.
+
+    .EXAMPLES
+    Example 1: Query a single computer
+    PS> Get-InstalledPrinters -ComputerName 'PC01'
+
+    Example 2: Query multiple computers with resolved users
+    PS> 'PC01','PC02' | Get-InstalledPrinters -ResolveUser
+
+    Example 3: Use existing sessions
+    PS> $s = New-PSSession -ComputerName 'PC01','PC02'
+    PS> Get-InstalledPrinters -Session $s
+
+    Example 4: Capture and export
+    PS> Get-InstalledPrinters -ComputerName 'PC01','PC02' -ResolveUser | Export-Csv printers.csv -NoTypeInformation
+
+    Example 5: Use alternate credentials
+    PS> Get-InstalledPrinters -ComputerName 'PC01','PC02' -Credential (Get-Credential)
+
+    .NOTES
+    Reads HKU (user hives) on target machines: HKEY_USERS\<SID>\Printers\Connections.
+    Per-machine printers under HKLM are not included. Requires appropriate permissions.
+    Errors during remote enumeration are reported via Write-Error but do not stop other targets.
+    When -Session is used, -Credential is ignored because the PSSession encapsulates authentication.
+
+    .LINK
+    about_Remote
+    .LINK
+    about_Registry_Provider
+    .LINK
+    about_CommonParameters
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'ComputerName')]
+    [OutputType([pscustomobject])]
     param (
-        [Parameter(Mandatory, ParameterSetName = 'ComputerName')]
-        [string]$ComputerName,
-        [Parameter(Mandatory, ParameterSetName = 'Session')]
-        [PSSession[]]$Session
+        [Parameter(Mandatory, ParameterSetName = 'ComputerName',
+            ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('CN', 'Server')]
+        [string[]]$ComputerName,
+
+        [Parameter(Mandatory, ParameterSetName = 'Session',
+            ValueFromPipeline)]
+        [ValidateNotNull()]
+        [PSSession[]]$Session,
+
+        [Parameter()]
+        [switch]$ResolveUser,
+
+        [Parameter(ParameterSetName = 'ComputerName')]
+        [ValidateRange(1, 128)]
+        [int]$ThrottleLimit = 16,
+
+        [Parameter(ParameterSetName = 'ComputerName')]
+        [Alias('Cred')]
+        [pscredential]$Credential
     )
-    return Invoke-Command -Session $Session -ScriptBlock {
-        $sids = Get-ChildItem 'Registry::HKEY_USERS' | Where-Object { $_.Name -match 'S-\d-\d+-(\d+-){1,14}\d+$' }
-        foreach ($sid in $sids) {
-            $keyPath = "Registry::$($sid.Name)\Printers\Connections"
-            if (Test-Path $keyPath) {
-                Get-ChildItem $keyPath | ForEach-Object {
-                    [PSCustomObject]@{
-                        SID     = $sid.PSChildName
-                        Printer = $_.PSChildName
+
+    begin {
+        # Script block executed on remote targets
+        $scriptBlock = {
+            param([switch]$ResolveUser)
+
+            try {
+                $sids = Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction Stop |
+                    Where-Object { $_.PSChildName -match '^S-\d-\d+-(\d+-){1,14}\d+$' }
+
+                foreach ($sid in $sids) {
+                    $keyPath = "Registry::$($sid.Name)\Printers\Connections"
+                    if (Test-Path $keyPath) {
+                        foreach ($conn in (Get-ChildItem $keyPath -ErrorAction SilentlyContinue)) {
+                            $user = $sid.PSChildName
+                            if ($ResolveUser) {
+                                try {
+                                    $sidObj = [System.Security.Principal.SecurityIdentifier]$sid.PSChildName
+                                    $user = $sidObj.Translate([System.Security.Principal.NTAccount]).Value
+                                } catch { } # fall back to SID if translation fails
+                            }
+
+                            [pscustomobject]@{
+                                PSTypeName   = 'AdventHealth.Prints.Connection'
+                                ComputerName = $env:COMPUTERNAME
+                                SID          = $sid.PSChildName
+                                User         = $user
+                                Printer      = $conn.PSChildName
+                            }
+                        }
                     }
                 }
+            } catch {
+                Write-Error -ErrorRecord $_
+            }
+        }
+    }
+
+    process {
+        if ($PSCmdlet.ParameterSetName -eq 'Session') {
+            foreach ($s in $Session) {
+                try {
+                    Invoke-Command -Session $s -ScriptBlock $scriptBlock -ArgumentList $ResolveUser -ErrorAction Stop
+                } catch {
+                    Write-Error -ErrorRecord $_
+                }
+            }
+        } else {
+            try {
+                Invoke-Command -ComputerName $ComputerName -Credential $Credential -ScriptBlock $scriptBlock -ArgumentList $ResolveUser -ThrottleLimit $ThrottleLimit -ErrorAction Stop
+            } catch {
+                Write-Error -ErrorRecord $_
             }
         }
     }
 }
 
+
 function Get-ADPrinterGroup {
+    <#
+.SYNOPSIS
+Finds Active Directory groups whose Name contains a given printer name, optionally restricting to “default” groups.
+
+.DESCRIPTION
+Attempts to query with Get-ADGroup -Filter (fast, native). If the AD cmdlet throws the common
+"Parameter set cannot be resolved..." error, the function automatically falls back to an LDAP
+DirectorySearcher query that returns equivalent results.
+
+.PARAMETER PrinterName
+Printer name (or fragment) to search for. Single quotes in the value are safely doubled for -Filter.
+For the LDAP fallback, special characters are RFC4515-escaped.
+
+.PARAMETER Default
+When specified, limits results to groups whose Name contains “DEF”.
+
+.PARAMETER Properties
+Additional AD group properties to retrieve. Defaults to 'Description'.
+Use '*' for all properties (AD cmdlet path only; LDAP fallback will return a subset plus any named properties).
+
+.PARAMETER Server
+AD DC (hostname[:port]) or AD LDS instance. Used by both the AD cmdlet (when available) and the LDAP fallback.
+
+.PARAMETER SearchBase
+DN of the container/OU to search. Used by both paths.
+
+.PARAMETER SearchScope
+Base, OneLevel, or Subtree. Used by both paths.
+
+.INPUTS
+System.String
+
+.OUTPUTS
+Microsoft.ActiveDirectory.Management.ADGroup (cmdlet path)
+or
+System.Management.Automation.PSCustomObject (LDAP fallback)
+
+.EXAMPLES
+PS> Get-ADPrinterGroup -PrinterName 'IBJ9'
+PS> Get-ADPrinterGroup -PrinterName 'HP' -Default -Properties ManagedBy,Description
+PS> Get-ADPrinterGroup -PrinterName 'Xerox' -Server 'dc01.contoso.com' -SearchBase 'OU=Printers,DC=contoso,DC=com'
+
+.NOTES
+Requires RSAT ActiveDirectory module for the cmdlet path; otherwise the function will use the LDAP fallback.
+#>
     [CmdletBinding()]
+    [OutputType([Microsoft.ActiveDirectory.Management.ADGroup], [pscustomobject])]
     param (
-        [Parameter(Position = 0, Mandatory)]
+        [Parameter(Position = 0, Mandatory, ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
         [string]$PrinterName,
-        [switch]$Default = $false,
-        [string[]]$Properties
+
+        [Parameter()]
+        [Alias('DefaultOnly')]
+        [switch]$Default,
+
+        [Parameter()]
+        [string[]]$Properties = @('Description'),
+
+        [Parameter()]
+        [string]$Server,
+
+        [Parameter()]
+        [string]$SearchBase,
+
+        [Parameter()]
+        [ValidateSet('Base', 'OneLevel', 'Subtree')]
+        [string]$SearchScope
     )
 
-    $filterString = "(Name -like '*$PrinterName*')"
-    if ($Default) { $filterString += " -and (Name -like '*DEF*')" } else { $filterString += " -and (Name -notlike '*DEF*')" }
+    begin {
+        # Map textual SearchScope to LDAP enum for fallback
+        $ldapScopeMap = @{
+            Base     = [System.DirectoryServices.SearchScope]::Base
+            OneLevel = [System.DirectoryServices.SearchScope]::OneLevel
+            Subtree  = [System.DirectoryServices.SearchScope]::Subtree
+        }
 
-    if ($Properties) { 
-        Get-ADGroup -Filter $filterString -Properties $Properties 
-    } else {
-        Get-ADGroup -Filter $filterString -Properties Description
+        function ConvertTo-LdapEscaped {
+            param([Parameter(Mandatory)][string]$InputText)
+            $sb = [System.Text.StringBuilder]::new()
+            foreach ($ch in $InputText.ToCharArray()) {
+                switch ($ch) {
+                    '(' { $null = $sb.Append('\28') }
+                    ')' { $null = $sb.Append('\29') }
+                    '*' { $null = $sb.Append('\2a') }
+                    '\' { $null = $sb.Append('\5c') }
+                    default {
+                        if ([int][char]$ch -eq 0) { $null = $sb.Append('\00') }
+                        else { $null = $sb.Append($ch) }
+                    }
+                }
+            }
+            $sb.ToString()
+        }
+
+        function Invoke-LdapFallback {
+            param(
+                [string]$PrinterName,
+                [switch]$Default,
+                [string]$Server,
+                [string]$SearchBase,
+                [string]$SearchScope,
+                [string[]]$EffectiveProperties
+            )
+
+            # Build LDAP filter: (&(objectCategory=group)(name=*needle*)(name=*DEF*)?)
+            $escaped = ConvertTo-LdapEscaped -InputText $PrinterName
+            $nameFilter = "(name=*$escaped*)"
+            if ($Default) { $nameFilter = "(&${nameFilter}(name=*DEF*))" }
+            $ldapFilter = "(& (objectCategory=group) $nameFilter)".Replace(' ', '')
+
+            # Build LDAP path
+            if ([string]::IsNullOrWhiteSpace($SearchBase)) {
+                $rootPath = if ($Server) { "LDAP://$Server/RootDSE" } else { 'LDAP://RootDSE' }
+                $root = New-Object System.DirectoryServices.DirectoryEntry($rootPath)
+                $defaultNC = $root.Properties['defaultNamingContext'][0]
+                $basePath = if ($Server) { "LDAP://$Server/$defaultNC" } else { "LDAP://$defaultNC" }
+            } else {
+                $basePath = if ($Server) { "LDAP://$Server/$SearchBase" } else { "LDAP://$SearchBase" }
+            }
+
+            $entry = New-Object System.DirectoryServices.DirectoryEntry($basePath)
+            $searcher = New-Object System.DirectoryServices.DirectorySearcher($entry)
+            $searcher.Filter = $ldapFilter
+            $searcher.SearchScope = $ldapScopeMap[$SearchScope]
+            if (-not $searcher.SearchScope) { $searcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree }
+
+            # Baseline properties always returned
+            $searcher.PropertiesToLoad.Clear()
+            foreach ($p in @('name', 'distinguishedName', 'description')) { [void]$searcher.PropertiesToLoad.Add($p) }
+
+            # Add any explicitly requested named props (ignore '*')
+            foreach ($p in ($EffectiveProperties | Where-Object { $_ -ne '*' })) {
+                [void]$searcher.PropertiesToLoad.Add($p)
+            }
+
+            $results = $searcher.FindAll()
+            foreach ($r in $results) {
+                $props = $r.Properties
+                $obj = [ordered]@{
+                    Name              = ($props['name'] | Select-Object -First 1)
+                    DistinguishedName = ($props['distinguishedname'] | Select-Object -First 1)
+                    ObjectClass       = 'group'
+                    Description       = ($props['description'] | Select-Object -First 1)
+                }
+                foreach ($p in ($EffectiveProperties | Where-Object { $_ -ne '*' -and $_ -notin @('name', 'distinguishedName', 'description') })) {
+                    $obj[$p] = ($props[$p] | Select-Object -First 1)
+                }
+                [pscustomobject]$obj
+            }
+        }
+    }
+
+    process {
+        # ---- Normalize $Properties into a clean string[] ----------------------
+        # Support callers who pass a single comma-separated string.
+        if ($Properties -is [string]) {
+            $Properties = $Properties -split '\s*,\s*' | Where-Object { $_ }
+        }
+        # Ensure it's string[] and unique (case-insensitive)
+        $Properties = @($Properties | Where-Object { $_ -is [string] -and $_ } | Select-Object -Unique)
+
+        # Default to Description if empty after normalization
+        if (-not $Properties -or $Properties.Count -eq 0) {
+            $Properties = @('Description')
+        }
+
+        # Build the Select-Object property list safely (no mixing raw list + variable later)
+        $calcObjectClass = @{ Name = 'ObjectClass'; Expression = { $_.ObjectClass } }
+        if ($Properties -contains '*') {
+            $selectProps = @('*', $calcObjectClass)   # '*' already includes Name/DN/etc.
+            $adProps = '*'                            # For Get-ADGroup -Properties
+        } else {
+            $selectProps = @('Name', 'DistinguishedName', $calcObjectClass) + $Properties
+            $adProps = $Properties
+        }
+
+        # Optional params for the AD cmdlet path (only when supplied)
+        $opt = @{}
+        if ($PSBoundParameters.ContainsKey('Server')) { $opt.Server = $Server }
+        if ($PSBoundParameters.ContainsKey('SearchBase')) { $opt.SearchBase = $SearchBase }
+        if ($PSBoundParameters.ContainsKey('SearchScope')) { $opt.SearchScope = $SearchScope }
+
+        # Safe -Filter (no outer parens; single quotes inside doubled)
+        $needle = $PrinterName -replace "'", "''"
+        $filter = "Name -like '*$needle*'"
+        if ($Default) { $filter += " -and Name -like '*DEF*'" }
+
+        try {
+            # AD cmdlet path
+            Get-ADGroup -Filter $filter -Properties $adProps @opt -ErrorAction Stop |
+                Select-Object -Property $selectProps
+        } catch {
+            $msg = $_.Exception.Message
+            if ($msg -like '*Parameter set cannot be resolved*') {
+                Write-Verbose 'Get-ADGroup raised a parameter-set error. Falling back to LDAP search.'
+                Invoke-LdapFallback -PrinterName $PrinterName -Default:$Default `
+                    -Server $Server -SearchBase $SearchBase -SearchScope $SearchScope `
+                    -EffectiveProperties $Properties |
+                    Select-Object -Property $selectProps
+            } else {
+                Write-Error -Message "Get-ADPrinterGroup failed (Filter: $filter): $msg" -ErrorRecord $_
+            }
+        }
     }
 }
-
-
 
 function Get-ADPrinters {
     <#
@@ -861,7 +1216,7 @@ function Get-OfflineDevices {
     - Uses the `Test-Connection` cmdlet to determine device availability.
     - Prompts the user to close Excel before writing the output.
     - Output is saved to: `$env:HOMEPATH\Documents\Offline_Devices.xlsx`
-    - Calls `Get-ExcelProcess` to ensure Excel is not running before export.
+    - Calls `Stop-ExcelProcess` to ensure Excel is not running before export.
     #>
 
     [CmdletBinding()]
@@ -895,7 +1250,7 @@ function Get-OfflineDevices {
         }
     }
 
-    Get-ExcelProcess
+    Stop-ExcelProcess
 
     if ($offlineDevices.Count -gt 0) {
         $countMSG = '{0} devices found to be offline.' -f $offlineDevices.Count
@@ -1126,7 +1481,7 @@ function Get-DuressTagUsers {
         # }
     }
 
-    Get-ExcelProcess -Force
+    Stop-ExcelProcess -Force
     $data | Export-Excel -Path "$env:HOMEPATH\sanitized_duress_tag_data.xlsx" -TableName 'Sanitized_Data' -WorksheetName 'Sanitized_Data' -ClearSheet -AutoSize
     return $data
 }
@@ -1157,7 +1512,6 @@ function Get-PrintersWithErrors {
     }
 
     return $printers
-
 }
 
 function Remove-PrintJobsWithErrors {
