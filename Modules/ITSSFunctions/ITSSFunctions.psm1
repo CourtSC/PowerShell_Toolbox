@@ -612,87 +612,171 @@ function Get-ADPrinters {
 function Get-Locked {
     <#
     .SYNOPSIS
-    Checks whether one or more remote computers are currently locked, with optional monitoring.
+    Checks whether one or more remote computers are currently locked; optionally monitors until they become locked.
 
     .DESCRIPTION
-    Uses PowerShell remoting to determine if specified remote computers are locked by checking for the 'LogonUI' process.
-    If -Monitor is specified, it will continuously check until the computer becomes locked.
+    Determines lock state by testing for the presence of the LogonUI process on the target computer(s).
+    Returns structured objects with ComputerName, IsLocked, and Timestamp. When -Monitor is specified,
+    the function repeatedly checks until the computer reports as locked or an optional timeout elapses.
+
+    Supports querying by -ComputerName (with optional -Credential) or by existing -Session objects.
 
     .PARAMETER ComputerName
-    Name of the remote computer to check.
+    One or more remote computers to query via PowerShell remoting. Accepts pipeline input.
 
     .PARAMETER Session
-    One or more PowerShell sessions to check.
+    One or more existing PSSessions to query.
+
+    .PARAMETER Credential
+    Credentials used when connecting to remote computers with -ComputerName. Ignored when -Session is used.
 
     .PARAMETER Monitor
-    If specified, continuously checks until the computer becomes locked.
+    When specified, repeatedly checks each target until it becomes locked (LogonUI is present),
+    or until -TimeoutSeconds (if provided) elapses.
 
-    .EXAMPLE
-    Get-Locked -ComputerName 'WS-12345' -Monitor
-    Get-Locked -Session $sessions -Monitor
+    .PARAMETER IntervalSeconds
+    Polling interval for -Monitor. Default: 5 seconds.
+
+    .PARAMETER TimeoutSeconds
+    Maximum time to wait (in seconds) for -Monitor. Default: 0 (no timeout).
+
+    .PARAMETER ThrottleLimit
+    Maximum concurrent remote calls for -ComputerName. Default: 16.
+
+    .INPUTS
+    System.String, Microsoft.PowerShell.Commands.PSSession
+    You can pipe computer names or PSSession objects.
+
+    .OUTPUTS
+    System.Management.Automation.PSCustomObject
+    Properties: ComputerName (String), IsLocked (Boolean), Timestamp (DateTime)
     #>
-
     [CmdletBinding(DefaultParameterSetName = 'ComputerName')]
+    [OutputType([pscustomobject])]
     param(
-        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = 'ComputerName')]
-        [string]$ComputerName,
+        [Parameter(Mandatory, Position = 0, ParameterSetName = 'ComputerName',
+            ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$ComputerName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'Session')]
+        [Parameter(Mandatory, ParameterSetName = 'Session',
+            ValueFromPipeline)]
+        [ValidateNotNull()]
         [System.Management.Automation.Runspaces.PSSession[]]$Session,
 
-        [switch]$Monitor
+        [Parameter(ParameterSetName = 'ComputerName')]
+        [pscredential]$Credential,
+
+        [Parameter()]
+        [switch]$Monitor,
+
+        [Parameter()]
+        [ValidateRange(1, 3600)]
+        [int]$IntervalSeconds = 5,
+
+        [Parameter()]
+        [ValidateRange(0, 86400)]
+        [int]$TimeoutSeconds = 0,
+
+        [Parameter(ParameterSetName = 'ComputerName')]
+        [ValidateRange(1, 128)]
+        [int]$ThrottleLimit = 16
     )
 
-    function Get-LockStatus {
-        param($Session)
-        $computer = $Session.ComputerName
-        do {
-            $result = Invoke-Command -Session $Session -ScriptBlock {
-                Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue
-            }
-            if (-not $result) {
-                Write-Host "$computer is unlocked."
-                return $true
-            }
-            Start-Sleep -Seconds 5
-        } while ($true)
+    begin {
+        # Remote test: returns $true if LogonUI is running (locked), else $false
+        $lockTestScript = {
+            $null -ne (Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue)
+        }
     }
 
-    if ($PSCmdlet.ParameterSetName -eq 'ComputerName') {
-        if ($Monitor) {
-            do {
-                $result = Invoke-Command -ComputerName $ComputerName -Credential $global:cred -ScriptBlock {
-                    Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue
-                }
-                if ($result) {
-                    Write-Host "$ComputerName is locked."
-                    break
-                }
-                Start-Sleep -Seconds 5
-            } while ($true)
-        } else {
-            $result = Invoke-Command -ComputerName $ComputerName -Credential $global:cred -ScriptBlock {
-                Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue
-            }
-            if ($result) {
-                Write-Host "$ComputerName is locked."
-            } else {
-                Write-Host "$ComputerName is unlocked."
-            }
-        }
-    } elseif ($PSCmdlet.ParameterSetName -eq 'Session') {
-        $Session | ForEach-Object -Parallel {
-            $computer = $_.ComputerName
-            if ($Monitor) {
-                Get-LockStatus -Session $_
-            } else {
-                $result = Invoke-Command -Session $_ -ScriptBlock {
-                    Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue
-                }
-                if ($result) {
-                    Write-Host "$computer is locked."
+    process {
+        if ($PSCmdlet.ParameterSetName -eq 'Session') {
+            foreach ($s in $Session) {
+                if ($Monitor) {
+                    $deadline = if ($TimeoutSeconds -gt 0) { (Get-Date).AddSeconds($TimeoutSeconds) } else { $null }
+                    while ($true) {
+                        try {
+                            $isLocked = Invoke-Command -Session $s -ScriptBlock $lockTestScript -ErrorAction Stop
+                        } catch {
+                            Write-Error -Message "Failed to query $($s.ComputerName): $($_.Exception.Message)" -ErrorRecord $_
+                            break
+                        }
+                        if ($isLocked) {
+                            [pscustomobject]@{
+                                ComputerName = $s.ComputerName
+                                IsLocked     = $true
+                                Timestamp    = Get-Date
+                            }
+                            break
+                        }
+                        if ($deadline -and (Get-Date) -ge $deadline) {
+                            [pscustomobject]@{
+                                ComputerName = $s.ComputerName
+                                IsLocked     = $false
+                                Timestamp    = Get-Date
+                            }
+                            break
+                        }
+                        Start-Sleep -Seconds $IntervalSeconds
+                    }
                 } else {
-                    Write-Host "$computer is unlocked."
+                    try {
+                        $isLocked = Invoke-Command -Session $s -ScriptBlock $lockTestScript -ErrorAction Stop
+                        [pscustomobject]@{
+                            ComputerName = $s.ComputerName
+                            IsLocked     = [bool]$isLocked
+                            Timestamp    = Get-Date
+                        }
+                    } catch {
+                        Write-Error -Message "Failed to query $($s.ComputerName): $($_.Exception.Message)" -ErrorRecord $_
+                    }
+                }
+            }
+        } else {
+            if ($Monitor) {
+                foreach ($cn in $ComputerName) {
+                    $deadline = if ($TimeoutSeconds -gt 0) { (Get-Date).AddSeconds($TimeoutSeconds) } else { $null }
+                    while ($true) {
+                        try {
+                            $isLocked = Invoke-Command -ComputerName $cn -Credential $Credential `
+                                -ScriptBlock $lockTestScript -ErrorAction Stop
+                        } catch {
+                            Write-Error -Message "Failed to query $($cn): $($_.Exception.Message)" -ErrorRecord $_
+                            break
+                        }
+                        if ($isLocked) {
+                            [pscustomobject]@{
+                                ComputerName = $cn
+                                IsLocked     = $true
+                                Timestamp    = Get-Date
+                            }
+                            break
+                        }
+                        if ($deadline -and (Get-Date) -ge $deadline) {
+                            [pscustomobject]@{
+                                ComputerName = $cn
+                                IsLocked     = $false
+                                Timestamp    = Get-Date
+                            }
+                            break
+                        }
+                        Start-Sleep -Seconds $IntervalSeconds
+                    }
+                }
+            } else {
+                try {
+                    Invoke-Command -ComputerName $ComputerName -Credential $Credential `
+                        -ThrottleLimit $ThrottleLimit -ScriptBlock $lockTestScript -ErrorAction Stop |
+                        ForEach-Object {
+                            [pscustomobject]@{
+                                ComputerName = $_.PSComputerName   # ✅ FIX: grab property, not variable
+                                IsLocked     = [bool]$_
+                                Timestamp    = Get-Date
+                            }
+                        }
+                } catch {
+                    Write-Error -Message "Failed one or more queries: $($_.Exception.Message)" -ErrorRecord $_
                 }
             }
         }
