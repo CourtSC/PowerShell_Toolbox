@@ -1819,13 +1819,13 @@ function Install-RemotePrintDriver {
             Write-Host "Establishing PSSession with $computer." -ForegroundColor Green
             if (Test-Connection $computer -Count 2 -Quiet) {} else { throw } 
         } catch {
-            Write-Host "$computer is offline." -ForegroundColor Red
+            Write-Error "$computer is offline."
             return
         }
         try {
             $Session = New-PSSession -ComputerName $computer -Credential $cred -ErrorAction Stop
         } catch { 
-            Write-Host "Unable to create session with $computer. Please confirm the computer name, verify it is online, and ensure you are entering your -a credentials when prompted." -ForegroundColor Red
+            Write-Error "Unable to create session with $computer. Please confirm the computer name, verify it is online, and ensure you are entering your -a credentials when prompted."
             return
         }
     }
