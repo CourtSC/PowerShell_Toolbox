@@ -1807,11 +1807,13 @@ function Install-RemotePrintDriver {
     [CmdletBinding()]
     param (
         [Parameter(Position = 0)]
-        [System.Management.Automation.Runspaces.PSSession[]]$Session
+        [System.Management.Automation.Runspaces.PSSession[]]$Session,
+        [Parameter()]
+        [pscredential]$Credential
     )
 
-    if (-not $cred) {
-        $cred = Get-Credential -Message 'Enter your admin credentials:'
+    if (-not $Credential) {
+        $Credential = Get-Credential -Message 'Enter your admin credentials:'
     }
     if (-not $Session) {
         $computer = Read-Host -Prompt 'Computer Name'
@@ -1823,7 +1825,7 @@ function Install-RemotePrintDriver {
             return
         }
         try {
-            $Session = New-PSSession -ComputerName $computer -Credential $cred -ErrorAction Stop
+            $Session = New-PSSession -ComputerName $computer -Credential $Credential -ErrorAction Stop
         } catch { 
             Write-Error "Unable to create session with $computer. Please confirm the computer name, verify it is online, and ensure you are entering your -a credentials when prompted."
             return
