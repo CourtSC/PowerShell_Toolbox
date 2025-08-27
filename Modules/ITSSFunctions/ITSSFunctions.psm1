@@ -1857,6 +1857,7 @@ function Install-RemotePrintDriver {
     Invoke-Command -Session $Session -ScriptBlock {
         param($driverName, $remotePath, $remoteDriverPath)
         $ErrorActionPreference = 'Stop'
+        Write-Host "Installing driver on $env:COMPUTERNAME."
         Start-Service -Name Spooler
         pnputil.exe /add-driver ($remotePath + '\' + $remoteDriverPath + '\hpcu250u.inf') /install
         Add-PrinterDriver -Name $driverName
