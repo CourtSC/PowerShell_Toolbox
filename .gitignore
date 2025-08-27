@@ -2,3 +2,4 @@ Modules/*
 !Modules/ITSSFunctions/**
 !Modules/ITSSFunctions/
 Help/
+/Microsoft.PowerShell_profile.ps1
