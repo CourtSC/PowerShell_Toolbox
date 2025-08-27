@@ -1783,25 +1783,75 @@ function Remove-PrinterPortSNMP {
 }
 
 function Get-MHDPrinter {
+    <#
+    .SYNOPSIS
+    Gets printer information from a set of MHD print servers.
+
+    .DESCRIPTION
+    Queries one or more print servers for one or more specified printer names.
+    By default, queries all six MHD print servers (ADCVPRNMHDMS001–006).
+
+    Returns structured objects with server name and printer details.
+    Errors are surfaced but do not stop enumeration.
+
+    .PARAMETER Printers
+    One or more printer names to look up. Accepts pipeline input.
+
+    .PARAMETER Servers
+    One or more print server names to query. Defaults to the six MHD servers.
+
+    .EXAMPLE
+    PS> Get-MHDPrinter -Printers 'HP123','CanonX'
+
+    .EXAMPLE
+    PS> 'HP123' | Get-MHDPrinter
+
+    .NOTES
+    Requires the PrintManagement module (`Get-Printer`).
+    .LINK
+    Get-Printer
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param (
-        [Parameter(Mandatory, Position = 0)]
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
         [string[]]$Printers,
-        [string[]]$Servers = (
-            'ADCVPRNMHDMS001', `
-                'ADCVPRNMHDMS002', `
-                'ADCVPRNMHDMS003', `
-                'ADCVPRNMHDMS004', `
-                'ADCVPRNMHDMS005', `
-                'ADCVPRNMHDMS006'
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$Servers = @(
+            'ADCVPRNMHDMS001',
+            'ADCVPRNMHDMS002',
+            'ADCVPRNMHDMS003',
+            'ADCVPRNMHDMS004',
+            'ADCVPRNMHDMS005',
+            'ADCVPRNMHDMS006'
         )
     )
 
-    foreach ($srv in $Servers) {
-        foreach ($printer in $Printers) {
-            try { Get-Printer -ComputerName $srv -Name $printer -ErrorAction Stop | Format-List } catch {}
+    process {
+        foreach ($srv in $Servers) {
+            foreach ($printer in $Printers) {
+                try {
+                    $p = Get-Printer -ComputerName $srv -Name $printer -ErrorAction Stop
+                    [pscustomobject]@{
+                        Server     = $srv
+                        Name       = $p.Name
+                        DriverName = $p.DriverName
+                        PortName   = $p.PortName
+                        Shared     = $p.Shared
+                        Published  = $p.Published
+                        Comment    = $p.Comment
+                    }
+                } catch {
+                    Write-Verbose "Printer '$printer' not found on $srv. ($($_.Exception.Message))"
+                }
+            }
         }
     }
 }
+
 
 function Install-RemotePrintDriver {
     <#
