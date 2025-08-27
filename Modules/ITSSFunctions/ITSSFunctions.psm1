@@ -1804,69 +1804,223 @@ function Get-MHDPrinter {
 }
 
 function Install-RemotePrintDriver {
-    [CmdletBinding()]
+    <#
+    .SYNOPSIS
+    Installs a single, approved print driver on one or more remote computers. No other driver is allowed.
+
+    .DESCRIPTION
+    This command is hard-locked to install the **HP Universal Printing PCL 6 (v7.0.0)** driver, from the exact
+    INF **hpcu250u.inf**, which must already be present/staged on the local machine. The function copies the local
+    driver’s directory to each remote machine (C:\Temp\HPUPD) and uses pnputil to add that INF, then registers the
+    driver via Add-PrinterDriver.
+
+    You can target computers via -ComputerName (with optional -Credential) or pass existing -Session objects.
+    Only sessions created by this function are removed on completion.
+
+    The operation honors -WhatIf / -Confirm.
+
+    .INPUTS
+    System.String, Microsoft.PowerShell.Commands.PSSession
+
+    .OUTPUTS
+    System.Management.Automation.PSCustomObject
+    Properties: ComputerName, DriverName, Installed, Version, InfPath
+
+    .PARAMETER ComputerName
+    One or more computer names to install the driver on. Accepts pipeline input.
+
+    .PARAMETER Session
+    One or more existing PSSessions to use. If specified, -Credential is ignored.
+
+    .PARAMETER Credential
+    Credentials for remoting when using -ComputerName. (Ignored with -Session.)
+
+    .PARAMETER ThrottleLimit
+    Max concurrent calls when using -ComputerName. Default 16.
+
+    .EXAMPLE
+    PS> 'PC01','PC02' | Install-RemotePrintDriver -Credential (Get-Credential) -Verbose
+
+    .EXAMPLE
+    PS> $s = New-PSSession -ComputerName 'PC01','PC02'
+    PS> Install-RemotePrintDriver -Session $s -Confirm
+
+    .NOTES
+    - Approved driver only: Name = "HP Universal Printing PCL 6 (v7.0.0)", INF = "hpcu250u.inf".
+    - Requires the driver to be installed/staged on the local machine first.
+    - Requires admin rights on target machines; uses pnputil and Add-PrinterDriver remotely.
+    - PowerShell 7+ recommended.
+    .LINK
+    about_Remote
+    about_CommonParameters
+    #>
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High', DefaultParameterSetName = 'ComputerName')]
+    [OutputType([pscustomobject])]
     param (
-        [Parameter(Position = 0)]
+        [Parameter(ParameterSetName = 'ComputerName', Position = 0, Mandatory, ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$ComputerName,
+
+        [Parameter(ParameterSetName = 'Session', Mandatory, ValueFromPipeline)]
+        [ValidateNotNull()]
         [System.Management.Automation.Runspaces.PSSession[]]$Session,
-        [Parameter()]
-        [pscredential]$Credential
+
+        [Parameter(ParameterSetName = 'ComputerName')]
+        [pscredential]$Credential,
+
+        [Parameter(ParameterSetName = 'ComputerName')]
+        [ValidateRange(1, 128)]
+        [int]$ThrottleLimit = 16
     )
 
-    if (-not $Credential) {
-        $Credential = Get-Credential -Message 'Enter your admin credentials:'
-    }
-    if (-not $Session) {
-        $computer = Read-Host -Prompt 'Computer Name'
+    begin {
+        # ==== HARD-LOCKED DRIVER METADATA (do not change to install anything else) ====
+        $DriverName = 'HP Universal Printing PCL 6 (v7.0.0)'
+        $ExpectedInfFile = 'hpcu250u.inf'
+        $RemoteRoot = 'C:\Temp\HPUPD'
+
+        # Validate the driver exists locally and locate its root folder
         try {
-            Write-Host "Establishing PSSession with $computer." -ForegroundColor Green
-            if (Test-Connection $computer -Count 2 -Quiet) {} else { throw } 
+            $localDriver = Get-PrinterDriver -Name $DriverName -ErrorAction Stop
+            $localInf = $localDriver.InfPath
+            if (-not $localInf) { throw 'Local driver InfPath not found.' }
+            $localRoot = Split-Path -Path $localInf -Parent
+            if (-not (Test-Path -LiteralPath $localRoot)) { throw "Local driver folder not found at '$localRoot'." }
+            # Check expected INF is present in the local tree
+            $expectedLocalInf = Join-Path -Path $localRoot -ChildPath $ExpectedInfFile
+            if (-not (Test-Path -LiteralPath $expectedLocalInf)) {
+                throw "Expected INF '$ExpectedInfFile' not found under '$localRoot'."
+            }
+            Write-Verbose "Local driver validated: Name='$DriverName', Root='$localRoot', INF='$ExpectedInfFile'."
         } catch {
-            Write-Error "$computer is offline."
+            Write-Error "Driver validation failed locally: $($_.Exception.Message)"
             return
         }
-        try {
-            $Session = New-PSSession -ComputerName $computer -Credential $Credential -ErrorAction Stop
-        } catch { 
-            Write-Error "Unable to create session with $computer. Please confirm the computer name, verify it is online, and ensure you are entering your -a credentials when prompted."
-            return
+
+        # Build the remote scriptblock - installs ONLY the expected INF for the hard-locked driver
+        $installScript = {
+            param(
+                [string]$DriverName,
+                [string]$RemoteRoot,
+                [string]$ExpectedInfFile
+            )
+            $ErrorActionPreference = 'Stop'
+
+            # Ensure spooler is running
+            if ((Get-Service -Name Spooler).Status -ne 'Running') {
+                Start-Service -Name Spooler
+            }
+
+            # Validate remote INF exists where we expect it
+            $infPath = Join-Path -Path $RemoteRoot -ChildPath $ExpectedInfFile
+            if (-not (Test-Path -LiteralPath $infPath)) {
+                throw "Expected INF '$ExpectedInfFile' not found at '$infPath'."
+            }
+
+            # Stage driver package (idempotent if already present)
+            $pnputil = Join-Path $env:SystemRoot 'System32\pnputil.exe'
+            if (-not (Test-Path -LiteralPath $pnputil)) {
+                throw "pnputil not found at '$pnputil'."
+            }
+
+            # Add the exact INF, then register the driver by the exact name
+            & $pnputil /add-driver $infPath /install | Out-String | Write-Verbose
+
+            # Add-PrinterDriver is idempotent; if present, it's a no-op
+            if (-not (Get-PrinterDriver -Name $DriverName -ErrorAction SilentlyContinue)) {
+                Add-PrinterDriver -Name $DriverName
+            }
+
+            # Return verification details
+            $drv = Get-PrinterDriver -Name $DriverName -ErrorAction Stop
+            [pscustomobject]@{
+                ComputerName = $env:COMPUTERNAME
+                DriverName   = $drv.Name
+                Installed    = $true
+                Version      = $drv.Version
+                InfPath      = $drv.InfPath
+            }
+        }
+
+        # Track sessions we create so we can clean up only those
+        $ownedSessions = New-Object System.Collections.Generic.List[System.Management.Automation.Runspaces.PSSession]
+        $targets = New-Object System.Collections.Generic.List[System.Management.Automation.Runspaces.PSSession]
+    }
+
+    process {
+        # Normalize Session set
+        if ($PSCmdlet.ParameterSetName -eq 'Session') {
+            foreach ($s in $Session) { $targets.Add($s) }
+        } else {
+            # Create sessions for each ComputerName
+            foreach ($cn in $ComputerName) {
+                if ($PSCmdlet.ShouldProcess($cn, 'Create PSSession')) {
+                    try {
+                        $s = New-PSSession -ComputerName $cn -Credential $Credential -ErrorAction Stop
+                        $ownedSessions.Add($s)
+                        $targets.Add($s)
+                        Write-Verbose "Session established: $cn"
+                    } catch {
+                        Write-Error "Failed to create session to '$cn': $($_.Exception.Message)"
+                    }
+                }
+            }
+        }
+
+        if ($targets.Count -eq 0) { return }
+
+        # Ensure remote folder exists, then copy files
+        foreach ($s in $targets) {
+            $cn = $s.ComputerName
+            if ($PSCmdlet.ShouldProcess($cn, "Prepare folder '$RemoteRoot'")) {
+                try {
+                    Invoke-Command -Session $s -ErrorAction Stop -ScriptBlock {
+                        param($RemoteRoot)
+                        New-Item -Path $RemoteRoot -ItemType Directory -Force | Out-Null
+                    } -ArgumentList $RemoteRoot
+                } catch {
+                    Write-Error "Failed to prepare folder on '$cn': $($_.Exception.Message)"
+                    continue
+                }
+            }
+
+            if ($PSCmdlet.ShouldProcess($cn, "Copy driver files to '$RemoteRoot'")) {
+                try {
+                    $source = Join-Path $localRoot '*'
+                    Copy-Item -Path $source -Destination $RemoteRoot -ToSession $s -Recurse -Force | Out-Null                    # Confirm expected INF exists remotely after copy (quick sanity check)
+                    $expectedRemoteInf = Join-Path -Path $RemoteRoot -ChildPath "hpcu250u.inf_amd64_82bdf715913ee606\$ExpectedInfFile"
+                    $present = Invoke-Command -Session $s -ErrorAction Stop -ScriptBlock {
+                        param($root, $file) 
+                        $path = (Get-ChildItem -Path $root -Recurse -Filter $file).PSPath
+                        Test-Path -Path $path
+                    } -ArgumentList $RemoteRoot, $ExpectedInfFile
+                    if (-not $present) {
+                        throw "Post-copy validation failed: '$ExpectedInfFile' not present at '$expectedRemoteInf'."
+                    }
+                } catch {
+                    Write-Error "File copy failed to '$cn': $($_.Exception.Message)"
+                    continue
+                }
+            }
+
+            # Install on this target
+            if ($PSCmdlet.ShouldProcess($cn, "Install driver '$DriverName' using '$ExpectedInfFile'")) {
+                try {
+                    Invoke-Command -Session $s -ErrorAction Stop -ScriptBlock $installScript -ArgumentList $DriverName, $RemoteRoot, $ExpectedInfFile
+                } catch {
+                    Write-Error "Installation failed on '$cn': $($_.Exception.Message)"
+                    continue
+                }
+            }
         }
     }
-    
-    # Sanity check for local driver installation
-    try {
-        $driverName = 'HP Universal Printing PCL 6 (v7.0.0)'
-        $driverPath = Get-PrinterDriver -Name $driverName | Select-Object -ExpandProperty InfPath | Split-Path
-        $driverInstalled = Test-Path $driverPath -ErrorAction Stop
-        if (-not $driverInstalled) { throw }
-    } catch {
-        Write-Error 'Driver path not found. Please ensure driver is installed on your computer before attempting to install driver on remote computer.'
-        return
-    }
-    
-    $remoteDriverPath = $driverPath | Split-Path -Leaf
-    $remotePath = 'C:\Temp\HPUPD'
 
-
-    Invoke-Command -Session $Session -ScriptBlock {
-        New-Item -Path 'C:\Temp\HPUPD' -ItemType Directory -Force | Out-Null
-    }
-
-    $Session | ForEach-Object {
-        Write-Host "Copying files to $($_.ComputerName)." -ForegroundColor Green
-        Copy-Item -Path $driverPath -Destination $remotePath -ToSession $_ -Recurse -Force | Out-Null 
-    }
-
-    Invoke-Command -Session $Session -ScriptBlock {
-        param($driverName, $remotePath, $remoteDriverPath)
-        $ErrorActionPreference = 'Stop'
-        Write-Host "Installing driver on $env:COMPUTERNAME."
-        Start-Service -Name Spooler
-        pnputil.exe /add-driver ($remotePath + '\' + $remoteDriverPath + '\hpcu250u.inf') /install
-        Add-PrinterDriver -Name $driverName
-        Get-PrinterDriver -Name $driverName | Select-Object Name, Manufacturer, Version, InfPath
-    } -ArgumentList $driverName, $remotePath, $remoteDriverPath
-
-    foreach ($s in $Session) {
-        Remove-PSSession -Session $s
+    end {
+        # Clean up only sessions we created
+        foreach ($s in $ownedSessions) {
+            if ($PSCmdlet.ShouldProcess($s.ComputerName, 'Remove owned session')) {
+                try { Remove-PSSession -Session $s -ErrorAction Stop } catch { Write-Verbose "Session cleanup warning: $($_.Exception.Message)" }
+            }
+        }
     }
 }
