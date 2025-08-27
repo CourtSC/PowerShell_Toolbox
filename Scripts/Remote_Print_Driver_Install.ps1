@@ -183,7 +183,7 @@ function Install-RemotePrintDriver {
                 try {
                     $source = Join-Path $localRoot '*'
                     Copy-Item -Path $source -Destination $RemoteRoot -ToSession $s -Recurse -Force | Out-Null                    # Confirm expected INF exists remotely after copy (quick sanity check)
-                    $expectedRemoteInf = Join-Path -Path $RemoteRoot -ChildPath "hpcu250u.inf_amd64_82bdf715913ee606\$ExpectedInfFile"
+                    $expectedRemoteInf = Join-Path -Path $RemoteRoot -ChildPath $ExpectedInfFile
                     $present = Invoke-Command -Session $s -ErrorAction Stop -ScriptBlock {
                         param($root, $file) 
                         $path = (Get-ChildItem -Path $root -Recurse -Filter $file).PSPath
