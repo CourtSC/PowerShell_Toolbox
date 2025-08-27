@@ -1829,11 +1829,21 @@ function Install-RemotePrintDriver {
             return
         }
     }
-
-    $driverName = 'HP Universal Printing PCL 6 (v7.0.0)'
-    $driverPath = Get-PrinterDriver -Name $driverName | Select-Object -ExpandProperty InfPath | Split-Path
+    
+    # Sanity check for local driver installation
+    try {
+        $driverName = 'HP Universal Printing PCL 6 (v7.0.0)'
+        $driverPath = Get-PrinterDriver -Name $driverName | Select-Object -ExpandProperty InfPath | Split-Path
+        $driverInstalled = Test-Path $driverPath -ErrorAction Stop
+        if (-not $driverInstalled) { throw }
+    } catch {
+        Write-Error 'Driver path not found. Please ensure driver is installed on your computer before attempting to install driver on remote computer.'
+        return
+    }
+    
     $remoteDriverPath = $driverPath | Split-Path -Leaf
     $remotePath = 'C:\Temp\HPUPD'
+
 
     Invoke-Command -Session $Session -ScriptBlock {
         New-Item -Path 'C:\Temp\HPUPD' -ItemType Directory -Force | Out-Null
