@@ -435,7 +435,7 @@ Requires RSAT ActiveDirectory module for the cmdlet path; otherwise the function
 
         # Safe -Filter (no outer parens; single quotes inside doubled)
         $needle = $PrinterName -replace "'", "''"
-        $filter = "Name -like '*$needle*'"
+        $filter = "Name -like '*PRN-$needle*'"
         if ($Default) { $filter += " -and Name -like '*DEF*'" }
 
         try {
