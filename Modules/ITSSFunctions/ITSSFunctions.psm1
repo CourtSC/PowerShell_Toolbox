@@ -1714,7 +1714,7 @@ function Remove-PrinterPortSNMP {
     }
 }
 
-function Get-MHDPrinter {
+function Get-MHDPrinters {
     <#
     .SYNOPSIS
     Gets printer information from a set of MHD print servers.
@@ -1746,8 +1746,7 @@ function Get-MHDPrinter {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param (
-        [Parameter(Mandatory, Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
-        [ValidateNotNullOrEmpty()]
+        [Parameter(Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
         [string[]]$Printers,
 
         [Parameter()]
@@ -1764,33 +1763,66 @@ function Get-MHDPrinter {
     begin {
         $total = $printers.count
         $count = 0
+        function Get-Progress {
+            param (
+                $Total, $Count = 0, $Message
+            )
+            $progress = [Math]::Round(($Count / $Total) * 100, 2)
+            Write-Progress -Activity $Message -Status "$progress% complete" -PercentComplete $progress
+        }
     }
 
     process {
-        foreach ($printer in $Printers) {
-            $count++
-            $progress = [Math]::Round(($count / $total) * 100, 2)
-            foreach ($srv in $Servers) {
-                Write-Progress -Activity "Checking $srv for $printer..." -Status "$progress% complete" -PercentComplete $progress
-                try {
-                    $p = Get-Printer -ComputerName $srv -Name $printer -ErrorAction Stop
-                    $port = Get-PrinterPort -ComputerName $srv -Name $p.PortName -ErrorAction Stop
-                    [pscustomobject]@{
-                        Server          = $srv
-                        Name            = $p.Name
-                        Status          = $p.PrinterStatus
-                        DriverName      = $p.DriverName
-                        PortName        = $p.PortName
-                        HostAddress     = $port.PrinterHostAddress
-                        PortDescription = $port.Description
-                        SNMPEnabled     = $port.SNMPEnabled
-                        Shared          = $p.Shared
-                        Published       = $p.Published
-                        Comment         = $p.Comment
-                    }
-                } catch {
-                    Write-Verbose "Printer '$printer' not found on $srv. ($($_.Exception.Message))"
+        if (!$PSBoundParameters.ContainsKey('Printers')) {
+            Write-Verbose 'No printers provided with function call. Looking up all printers.'
+            $allPrinters = $Servers | ForEach-Object -Parallel {
+                Get-Printer -ComputerName $_
+            }
+            $total = $allPrinters.count
+            $output = foreach ($p in $allPrinters) {
+                $count++
+                Get-Progress -Total $total -Count $count -Message "Checking $($p.ComputerName) for $($p.Name)..."
+                $port = Get-PrinterPort -ComputerName $p.ComputerName -Name $p.PortName -ErrorAction Stop
+                [pscustomobject]@{
+                    Server          = $p.ComputerName
+                    Name            = $p.Name
+                    Status          = $p.PrinterStatus
+                    DriverName      = $p.DriverName
+                    PortName        = $p.PortName
+                    HostAddress     = $port.PrinterHostAddress
+                    PortDescription = $port.Description
+                    SNMPEnabled     = $port.SNMPEnabled
+                    Shared          = $p.Shared
+                    Published       = $p.Published
+                    Comment         = $p.Comment
                 }
+            }
+            return $output
+        } else {
+            foreach ($printer in $Printers) {
+                foreach ($srv in $Servers) {
+                    Get-Progress -Total $total -Count $count -Message "Checking $($srv) for $($p.Name)..."
+                    try {
+                        $p = Get-Printer -ComputerName $srv -Name $printer -ErrorAction Stop
+                        $port = Get-PrinterPort -ComputerName $srv -Name $p.PortName -ErrorAction Stop
+                        [pscustomobject]@{
+                            Server          = $srv
+                            Name            = $p.Name
+                            Status          = $p.PrinterStatus
+                            DriverName      = $p.DriverName
+                            PortName        = $p.PortName
+                            HostAddress     = $port.PrinterHostAddress
+                            PortDescription = $port.Description
+                            SNMPEnabled     = $port.SNMPEnabled
+                            Shared          = $p.Shared
+                            Published       = $p.Published
+                            Comment         = $p.Comment
+                        }
+                    } catch {
+                        Write-Verbose "Printer '$printer' not found on $srv. ($($_.Exception.Message))"
+                    }
+                }
+                $count++
             }
         }
     }
@@ -2015,6 +2047,240 @@ function Install-RemotePrintDriver {
             if ($PSCmdlet.ShouldProcess($s.ComputerName, 'Remove owned session')) {
                 try { Remove-PSSession -Session $s -ErrorAction Stop } catch { Write-Verbose "Session cleanup warning: $($_.Exception.Message)" }
             }
+        }
+    }
+}
+
+function Set-PrinterPort {
+    <#
+    .SYNOPSIS
+    Repairs a printer’s TCP/IP port configuration on a print server by using a temporary port.
+
+    .DESCRIPTION
+    This function fixes misconfigured TCP/IP ports for a given printer on a target print server. Because there is no
+    PowerShell cmdlet to modify an existing port in place, it:
+    1) Creates a unique temporary port with the desired host address,
+    2) Repoints the printer to that temporary port,
+    3) Removes the existing (incorrect) port if present,
+    4) Recreates the correct port with the desired host address,
+    5) Repoints the printer back to the correct port,
+    6) Optionally cleans up the temporary port.
+
+    The function supports -WhatIf/-Confirm and can run non-interactively with -Force to skip confirmation prompts.
+
+    .PARAMETER Name
+    The printer name on the target print server.
+
+    .PARAMETER Server
+    The print server (ComputerName) hosting the printer.
+
+    .PARAMETER HostAddress
+    The desired TCP/IP host address for the port (IP or DNS host).
+
+    .PARAMETER Force
+    Skips interactive confirmations (ShouldContinue) while still honoring -WhatIf/-Confirm.
+
+    .PARAMETER NoCleanup
+    Keeps the temporary port after the operation (useful for troubleshooting). By default the temp port is removed.
+
+    .INPUTS
+    System.String
+    Accepts objects with Name/Server/HostAddress via property-based pipeline.
+
+    .OUTPUTS
+    System.Management.Automation.PSCustomObject
+    Emits: Server, PrinterName, FromPort, ToPort, TempPort, PortRecreated, Success, Message
+
+    .EXAMPLES
+    # Fix the port config for a single printer
+    PS> Set-PrinterPort -Name 'HP-LJ-05' -Server 'PRINT01' -HostAddress '10.12.34.56' -Verbose
+
+    # Run non-interactively (no prompts), still supports -WhatIf/-Confirm
+    PS> Set-PrinterPort -Name 'HP-LJ-05' -Server 'PRINT01' -HostAddress '10.12.34.56' -Force
+
+    # Pipe objects with the required properties
+    PS> [pscustomobject]@{ Name='HP-A1'; Server='PRINT01'; HostAddress='prn-a1.contoso.com' } | Set-PrinterPort -Force
+    #>
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('Printer', 'PrinterName')]
+        [string]$Name,
+
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ComputerName')]
+        [string]$Server,
+
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('PrinterHostAddress', 'Address', 'Host')]
+        [string]$HostAddress,
+
+        [Parameter()]
+        [switch]$Force,
+
+        [Parameter()]
+        [switch]$NoCleanup
+    )
+
+    begin {
+        function New-TempPortName {
+            # Highly unlikely to collide; short GUID keeps names readable
+            return ('zz-temp-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+        }
+        # Canonical test scriptblocks
+        $sbPortExists = {
+            param($PortName, $Server)
+            $null -ne (Get-PrinterPort -ComputerName $Server -Name $PortName -ErrorAction SilentlyContinue)
+        }
+        $sbGetPrinter = {
+            param($Name, $Server)
+            Get-Printer -Name $Name -ComputerName $Server -ErrorAction Stop
+        }
+    }
+
+    process {
+        $tempPortName = New-TempPortName
+        $fromPort = $null
+        $finalPort = $HostAddress
+        $recreated = $false
+
+        try {
+            # Ensure printer exists and capture its current port
+            $printer = & $sbGetPrinter $Name $Server
+            $fromPort = $printer.PortName
+        } catch {
+            Write-Error "[$Server] Printer '$Name' not found or inaccessible: $($_.Exception.Message)"
+            return
+        }
+
+        # 1) Ensure a temp port with the DESIRED host address exists
+        if ($PSCmdlet.ShouldProcess($Server, "Create temporary port '$tempPortName' for $HostAddress")) {
+            try {
+                # Create temp with the target address; if name collides (very unlikely), generate a new one
+                while (& $sbPortExists $tempPortName $Server) {
+                    $tempPortName = New-TempPortName
+                }
+                Add-PrinterPort -ComputerName $Server -Name $tempPortName -PrinterHostAddress $HostAddress -ErrorAction Stop
+                Write-Verbose "[$Server] Temp port '$tempPortName' created with host $HostAddress."
+            } catch {
+                Write-Error "[$Server] Failed creating temp port '$tempPortName' for host $($HostAddress): $($_.Exception.Message)"
+                return
+            }
+        }
+
+        # 2) Point the printer to the temp port (safe detour)
+        if ($PSCmdlet.ShouldProcess($Server, "Repoint printer '$Name' to temp port '$tempPortName'")) {
+            try {
+                Set-Printer -Name $Name -ComputerName $Server -PortName $tempPortName -ErrorAction Stop
+                Write-Verbose "[$Server] '$Name' temporarily moved to port '$tempPortName'."
+            } catch {
+                Write-Error "[$Server] Failed to assign temp port '$tempPortName' to '$Name': $($_.Exception.Message)"
+                return
+            }
+        }
+
+        # 3) Remove the existing (possibly incorrect) final port if it exists
+        $finalExists = & $sbPortExists $finalPort $Server
+        if ($finalExists) {
+            $caption = "Remove port $finalPort on $Server?"
+            $message = "Port $finalPort will be removed and recreated with the desired host address."
+            if ($Force -or $PSCmdlet.ShouldContinue($message, $caption)) {
+                if ($PSCmdlet.ShouldProcess($Server, "Remove port '$finalPort'")) {
+                    try {
+                        Remove-PrinterPort -ComputerName $Server -Name $finalPort -ErrorAction Stop
+                        Write-Verbose "[$Server] Port '$finalPort' removed."
+                        $finalExists = $false
+                    } catch {
+                        Write-Error "[$Server] Failed removing port '$finalPort': $($_.Exception.Message)"
+                        # Try to roll back printer to its original port to leave system usable
+                        try {
+                            Set-Printer -Name $Name -ComputerName $Server -PortName $fromPort -ErrorAction Stop
+                        } catch { }
+                        return
+                    }
+                }
+            } else {
+                Write-Verbose "[$Server] Removal of port '$finalPort' cancelled by user."
+            }
+        }
+
+        # 4) Create (or recreate) the final port with the desired address
+        if (-not $finalExists) {
+            $caption = "Create port $finalPort on $Server?"
+            $message = "Port $finalPort will be created with host address $HostAddress."
+            if ($Force -or $PSCmdlet.ShouldContinue($message, $caption)) {
+                if ($PSCmdlet.ShouldProcess($Server, "Create port '$finalPort' for host $HostAddress")) {
+                    try {
+                        Add-PrinterPort -ComputerName $Server -Name $finalPort -PrinterHostAddress $HostAddress -ErrorAction Stop
+                        $recreated = $true
+                        Write-Verbose "[$Server] Port '$finalPort' created with host $HostAddress."
+                    } catch {
+                        Write-Error "[$Server] Failed creating port '$finalPort': $($_.Exception.Message)"
+                        # Rollback printer to original port
+                        try {
+                            Set-Printer -Name $Name -ComputerName $Server -PortName $fromPort -ErrorAction Stop
+                        } catch { }
+                        return
+                    }
+                }
+            } else {
+                Write-Verbose "[$Server] Creation of port '$finalPort' cancelled by user."
+            }
+        }
+
+        # 5) Repoint printer back to the final port
+        if ($PSCmdlet.ShouldProcess($Server, "Repoint printer '$Name' to final port '$finalPort'")) {
+            try {
+                Set-Printer -Name $Name -ComputerName $Server -PortName $finalPort -ErrorAction Stop
+                Write-Verbose "[$Server] '$Name' moved to final port '$finalPort'."
+            } catch {
+                Write-Error "[$Server] Failed to assign final port '$finalPort' to '$Name': $($_.Exception.Message)"
+                return
+            }
+        }
+
+        # 6) Cleanup temp port (unless requested to keep)
+        if (-not $NoCleanup) {
+            $caption = "Remove temporary port $tempPortName on $Server?"
+            $message = 'Temp port will be removed.'
+            if ($Force -or $PSCmdlet.ShouldContinue($message, $caption)) {
+                if ($PSCmdlet.ShouldProcess($Server, "Remove temp port '$tempPortName'")) {
+                    try {
+                        Remove-PrinterPort -ComputerName $Server -Name $tempPortName -ErrorAction Stop
+                        Write-Verbose "[$Server] Temp port '$tempPortName' removed."
+                    } catch {
+                        Write-Verbose "[$Server] Warning: temp port '$tempPortName' could not be removed: $($_.Exception.Message)"
+                    }
+                }
+            }
+        } else {
+            Write-Verbose "[$Server] Temp port '$tempPortName' retained due to -NoCleanup."
+        }
+
+        # Verification
+        $p = Get-Printer -Name $Name -ComputerName $Server -ErrorAction SilentlyContinue
+        $success = $false
+        $msg = ''
+        if ($p -and $p.PortName -eq $finalPort) {
+            $success = $true
+            $msg = "Printer '$Name' now using port '$finalPort'."
+        } else {
+            $msg = "Verification failed: '$Name' is on port '$($p.PortName)' (expected '$finalPort')."
+        }
+
+        [pscustomobject]@{
+            Server        = $Server
+            PrinterName   = $Name
+            FromPort      = $fromPort
+            ToPort        = $finalPort
+            TempPort      = $tempPortName
+            PortRecreated = $recreated
+            Success       = $success
+            Message       = $msg
         }
     }
 }
