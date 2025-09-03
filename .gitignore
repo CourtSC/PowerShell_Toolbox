@@ -1,5 +1,9 @@
 Modules/*
 !Modules/ITSSFunctions/**
 !Modules/ITSSFunctions/
+!Modules/Microsoft.PowerShell.SecretManagement/**
+!Modules/Microsoft.PowerShell.SecretManagement/
+!Modules/Microsoft.PowerShell.SecretStore/**
+!Modules/Microsoft.PowerShell.SecretStore/
 Help/
 /Microsoft.PowerShell_profile.ps1
