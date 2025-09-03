@@ -246,67 +246,80 @@ function Get-InstalledPrinters {
         }
     }
 }
-
-
-function Get-ADPrinterGroup {
+function Get-ADPrinterGroups {
     <#
-.SYNOPSIS
-Finds Active Directory groups whose Name contains a given printer name, optionally restricting to “default” groups.
+    .SYNOPSIS
+    Gets the standard and default Active Directory groups for one or more printer names.
 
-.DESCRIPTION
-Attempts to query with Get-ADGroup -Filter (fast, native). If the AD cmdlet throws the common
-"Parameter set cannot be resolved..." error, the function automatically falls back to an LDAP
-DirectorySearcher query that returns equivalent results.
+    .DESCRIPTION
+    For each printer name, this function looks up two AD groups based on your naming convention:
+    - Standard group: <Prefix><PrinterName>
+    - Default group : <Prefix><PrinterName>-<DefaultMarker>
 
-.PARAMETER PrinterName
-Printer name (or fragment) to search for. Single quotes in the value are safely doubled for -Filter.
-For the LDAP fallback, special characters are RFC4515-escaped.
+    By default, Prefix is 'ORL-PRN-' and DefaultMarker is 'DEF'. The function returns any groups
+    that exist and ignores missing ones (reported via -Verbose). You can request additional AD
+    properties with -Properties; the function will also include Description and info unless you
+    request '*' (all properties).
 
-.PARAMETER Default
-When specified, limits results to groups whose Name contains “DEF”.
+    .PARAMETER PrinterName
+    One or more printer names. Accepts pipeline input and property-based pipeline (Printer/Name).
 
-.PARAMETER Properties
-Additional AD group properties to retrieve. Defaults to 'Description'.
-Use '*' for all properties (AD cmdlet path only; LDAP fallback will return a subset plus any named properties).
+    .PARAMETER Properties
+    Additional AD group properties to retrieve. If '*' is specified, all properties are returned.
+    Otherwise the function ensures 'Description' and 'info' are included.
 
-.PARAMETER Server
-AD DC (hostname[:port]) or AD LDS instance. Used by both the AD cmdlet (when available) and the LDAP fallback.
+    .PARAMETER Prefix
+    The naming prefix for printer groups (default: 'ORL-PRN-').
 
-.PARAMETER SearchBase
-DN of the container/OU to search. Used by both paths.
+    .PARAMETER DefaultMarker
+    The suffix that identifies default groups (default: 'DEF').
 
-.PARAMETER SearchScope
-Base, OneLevel, or Subtree. Used by both paths.
+    .PARAMETER Server
+    Domain controller or AD LDS instance to query.
 
-.INPUTS
-System.String
+    .PARAMETER SearchBase
+    Distinguished name (DN) that limits the search to a specific OU/container.
 
-.OUTPUTS
-Microsoft.ActiveDirectory.Management.ADGroup (cmdlet path)
-or
-System.Management.Automation.PSCustomObject (LDAP fallback)
+    .PARAMETER SearchScope
+    Base, OneLevel, or Subtree.
 
-.EXAMPLES
-PS> Get-ADPrinterGroup -PrinterName 'IBJ9'
-PS> Get-ADPrinterGroup -PrinterName 'HP' -Default -Properties ManagedBy,Description
-PS> Get-ADPrinterGroup -PrinterName 'Xerox' -Server 'dc01.contoso.com' -SearchBase 'OU=Printers,DC=contoso,DC=com'
+    .INPUTS
+    System.String
 
-.NOTES
-Requires RSAT ActiveDirectory module for the cmdlet path; otherwise the function will use the LDAP fallback.
-#>
+    .OUTPUTS
+    Microsoft.ActiveDirectory.Management.ADGroup
+
+    .EXAMPLES
+    PS> Get-ADPrinterGroups -PrinterName 'IBJ9' -Verbose
+    PS> 'IBJ9','HP-5100' | Get-ADPrinterGroups -Properties ManagedBy
+    PS> Get-ADPrinterGroups -PrinterName 'X123' -Prefix 'MCO-PRN-' -DefaultMarker 'DEFAULT'
+    PS> Get-ADPrinterGroups -PrinterName 'HP-Color' -Server 'dc01.contoso.com' -SearchBase 'OU=Print,DC=contoso,DC=com'
+
+    .NOTES
+    Requires RSAT ActiveDirectory module (Get-ADGroup).
+    .LINK
+    Get-ADGroup
+    about_ActiveDirectory
+    about_CommonParameters
+    #>
     [CmdletBinding()]
-    [OutputType([Microsoft.ActiveDirectory.Management.ADGroup], [pscustomobject])]
+    [OutputType([Microsoft.ActiveDirectory.Management.ADGroup])]
     param (
-        [Parameter(Position = 0, Mandatory, ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [Alias('Printer', 'Name')]
         [ValidateNotNullOrEmpty()]
-        [string]$PrinterName,
+        [string[]]$PrinterName,
 
         [Parameter()]
-        [Alias('DefaultOnly')]
-        [switch]$Default,
+        [string[]]$Properties = @(),
 
         [Parameter()]
-        [string[]]$Properties = @('Description'),
+        [ValidateNotNullOrEmpty()]
+        [string]$Prefix = 'ORL-PRN-',
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$DefaultMarker = 'DEF',
 
         [Parameter()]
         [string]$Server,
@@ -320,142 +333,45 @@ Requires RSAT ActiveDirectory module for the cmdlet path; otherwise the function
     )
 
     begin {
-        # Map textual SearchScope to LDAP enum for fallback
-        $ldapScopeMap = @{
-            Base     = [System.DirectoryServices.SearchScope]::Base
-            OneLevel = [System.DirectoryServices.SearchScope]::OneLevel
-            Subtree  = [System.DirectoryServices.SearchScope]::Subtree
-        }
-
-        function ConvertTo-LdapEscaped {
-            param([Parameter(Mandatory)][string]$InputText)
-            $sb = [System.Text.StringBuilder]::new()
-            foreach ($ch in $InputText.ToCharArray()) {
-                switch ($ch) {
-                    '(' { $null = $sb.Append('\28') }
-                    ')' { $null = $sb.Append('\29') }
-                    '*' { $null = $sb.Append('\2a') }
-                    '\' { $null = $sb.Append('\5c') }
-                    default {
-                        if ([int][char]$ch -eq 0) { $null = $sb.Append('\00') }
-                        else { $null = $sb.Append($ch) }
-                    }
-                }
-            }
-            $sb.ToString()
-        }
-
-        function Invoke-LdapFallback {
-            param(
-                [string]$PrinterName,
-                [switch]$Default,
-                [string]$Server,
-                [string]$SearchBase,
-                [string]$SearchScope,
-                [string[]]$EffectiveProperties
-            )
-
-            # Build LDAP filter: (&(objectCategory=group)(name=*needle*)(name=*DEF*)?)
-            $escaped = ConvertTo-LdapEscaped -InputText $PrinterName
-            $nameFilter = "(name=*$escaped*)"
-            if ($Default) { $nameFilter = "(&${nameFilter}(name=*DEF*))" }
-            $ldapFilter = "(& (objectCategory=group) $nameFilter)".Replace(' ', '')
-
-            # Build LDAP path
-            if ([string]::IsNullOrWhiteSpace($SearchBase)) {
-                $rootPath = if ($Server) { "LDAP://$Server/RootDSE" } else { 'LDAP://RootDSE' }
-                $root = New-Object System.DirectoryServices.DirectoryEntry($rootPath)
-                $defaultNC = $root.Properties['defaultNamingContext'][0]
-                $basePath = if ($Server) { "LDAP://$Server/$defaultNC" } else { "LDAP://$defaultNC" }
-            } else {
-                $basePath = if ($Server) { "LDAP://$Server/$SearchBase" } else { "LDAP://$SearchBase" }
-            }
-
-            $entry = New-Object System.DirectoryServices.DirectoryEntry($basePath)
-            $searcher = New-Object System.DirectoryServices.DirectorySearcher($entry)
-            $searcher.Filter = $ldapFilter
-            $searcher.SearchScope = $ldapScopeMap[$SearchScope]
-            if (-not $searcher.SearchScope) { $searcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree }
-
-            # Baseline properties always returned
-            $searcher.PropertiesToLoad.Clear()
-            foreach ($p in @('name', 'distinguishedName', 'description')) { [void]$searcher.PropertiesToLoad.Add($p) }
-
-            # Add any explicitly requested named props (ignore '*')
-            foreach ($p in ($EffectiveProperties | Where-Object { $_ -ne '*' })) {
-                [void]$searcher.PropertiesToLoad.Add($p)
-            }
-
-            $results = $searcher.FindAll()
-            foreach ($r in $results) {
-                $props = $r.Properties
-                $obj = [ordered]@{
-                    Name              = ($props['name'] | Select-Object -First 1)
-                    DistinguishedName = ($props['distinguishedname'] | Select-Object -First 1)
-                    ObjectClass       = 'group'
-                    Description       = ($props['description'] | Select-Object -First 1)
-                }
-                foreach ($p in ($EffectiveProperties | Where-Object { $_ -ne '*' -and $_ -notin @('name', 'distinguishedName', 'description') })) {
-                    $obj[$p] = ($props[$p] | Select-Object -First 1)
-                }
-                [pscustomobject]$obj
-            }
-        }
-    }
-
-    process {
-        # ---- Normalize $Properties into a clean string[] ----------------------
-        # Support callers who pass a single comma-separated string.
-        if ($Properties -is [string]) {
-            $Properties = $Properties -split '\s*,\s*' | Where-Object { $_ }
-        }
-        # Ensure it's string[] and unique (case-insensitive)
-        $Properties = @($Properties | Where-Object { $_ -is [string] -and $_ } | Select-Object -Unique)
-
-        # Default to Description if empty after normalization
-        if (-not $Properties -or $Properties.Count -eq 0) {
-            $Properties = @('Description')
-        }
-
-        # Build the Select-Object property list safely (no mixing raw list + variable later)
-        $calcObjectClass = @{ Name = 'ObjectClass'; Expression = { $_.ObjectClass } }
-        if ($Properties -contains '*') {
-            $selectProps = @('*', $calcObjectClass)   # '*' already includes Name/DN/etc.
-            $adProps = '*'                            # For Get-ADGroup -Properties
-        } else {
-            $selectProps = @('Name', 'DistinguishedName', $calcObjectClass) + $Properties
-            $adProps = $Properties
-        }
-
-        # Optional params for the AD cmdlet path (only when supplied)
+        # normalize SearchScope for Get-ADGroup if provided
         $opt = @{}
         if ($PSBoundParameters.ContainsKey('Server')) { $opt.Server = $Server }
         if ($PSBoundParameters.ContainsKey('SearchBase')) { $opt.SearchBase = $SearchBase }
         if ($PSBoundParameters.ContainsKey('SearchScope')) { $opt.SearchScope = $SearchScope }
+        
+        # ---- Normalize $Properties ----
+        if ($Properties -is [string]) {
+            $Properties = $Properties -split '\s*,\s*' | Where-Object { $_ }
+        }
+        $Properties = @($Properties)  # ensure array
+    
+        $effectiveProps = if ($Properties -contains '*') { '*' } else {
+            @($Properties + 'Description' + 'info' | Select-Object -Unique)
+        }
+    }
 
-        # Safe -Filter (no outer parens; single quotes inside doubled)
-        $needle = $PrinterName -replace "'", "''"
-        $filter = "Name -like '*PRN-$needle*'"
-        if ($Default) { $filter += " -and Name -like '*DEF*'" }
+    process {
+        foreach ($name in $PrinterName) {
+            if (-not $name) { continue }
 
-        try {
-            # AD cmdlet path
-            Get-ADGroup -Filter $filter -Properties $adProps @opt -ErrorAction Stop |
-                Select-Object -Property $selectProps
-        } catch {
-            $msg = $_.Exception.Message
-            if ($msg -like '*Parameter set cannot be resolved*') {
-                Write-Verbose 'Get-ADGroup raised a parameter-set error. Falling back to LDAP search.'
-                Invoke-LdapFallback -PrinterName $PrinterName -Default:$Default `
-                    -Server $Server -SearchBase $SearchBase -SearchScope $SearchScope `
-                    -EffectiveProperties $Properties |
-                    Select-Object -Property $selectProps
-            } else {
-                Write-Error -Message "Get-ADPrinterGroup failed (Filter: $filter): $msg" -ErrorRecord $_
+            # Build the two identities we want to try
+            $ids = @(
+                ('{0}{1}' -f $Prefix, $name),
+                ('{0}{1}-{2}' -f $Prefix, $name, $DefaultMarker)
+            )
+
+            foreach ($id in $ids) {
+                try {
+                    Write-Verbose "Querying group: $id"
+                    Get-ADGroup -Identity $id -Properties $effectiveProps @opt -ErrorAction Stop
+                } catch {
+                    Write-Verbose "Group not found or inaccessible: $id ($($_.Exception.Message))"
+                }
             }
         }
     }
 }
+
 
 function Get-ADPrinters {
     <#
@@ -1078,17 +994,33 @@ function Get-ADGroupMemberships {
     param(
         [Parameter(Mandatory = $true, Position = 0)]
         [string]$Identity,
-        [string[]]$Properties
+        [string[]]$Properties = @()
     )
 
-    try {
-        $adObj = Get-ADComputer -Identity $Identity -Properties MemberOf | Select-Object -ExpandProperty MemberOf
-    } catch {}
-    
-    if (-not $adObj) {
-        $adObj = Get-ADUser -Identity $Identity -Properties MemberOf | Select-Object -ExpandProperty MemberOf
+    # If user passed a single comma-separated string, split it
+    if ($Properties -is [string]) {
+        $Properties = $Properties -split '\s*,\s*' | Where-Object { $_ }
+    }
+    $Properties = @($Properties)             # ensure array
+    if ($Properties -contains '*') {
+        $effectiveProps = '*'
+    } else {
+        $effectiveProps = @($Properties + 'MemberOf' | Select-Object -Unique)
     }
 
+    $splat = @{
+        Identity   = $Identity
+        Properties = $effectiveProps
+    }
+
+    try {
+        $adObj = Get-ADComputer @splat | Select-Object -ExpandProperty MemberOf
+        if (-not $adObj) {
+            $adObj = Get-ADUser @splat -ErrorAction Stop | Select-Object -ExpandProperty MemberOf
+        }
+    } catch {
+        Write-Error "AD Object not found for $($splat.Identity). ($($_.Exception.Message))"
+    }
     
     if ($Properties) {
         $groups = $adObj | ForEach-Object {
@@ -1829,20 +1761,32 @@ function Get-MHDPrinter {
             'ADCVPRNMHDMS006'
         )
     )
+    begin {
+        $total = $printers.count
+        $count = 0
+    }
 
     process {
-        foreach ($srv in $Servers) {
-            foreach ($printer in $Printers) {
+        foreach ($printer in $Printers) {
+            $count++
+            $progress = [Math]::Round(($count / $total) * 100, 2)
+            foreach ($srv in $Servers) {
+                Write-Progress -Activity "Checking $srv for $printer..." -Status "$progress% complete" -PercentComplete $progress
                 try {
                     $p = Get-Printer -ComputerName $srv -Name $printer -ErrorAction Stop
+                    $port = Get-PrinterPort -ComputerName $srv -Name $p.PortName -ErrorAction Stop
                     [pscustomobject]@{
-                        Server     = $srv
-                        Name       = $p.Name
-                        DriverName = $p.DriverName
-                        PortName   = $p.PortName
-                        Shared     = $p.Shared
-                        Published  = $p.Published
-                        Comment    = $p.Comment
+                        Server          = $srv
+                        Name            = $p.Name
+                        Status          = $p.PrinterStatus
+                        DriverName      = $p.DriverName
+                        PortName        = $p.PortName
+                        HostAddress     = $port.PrinterHostAddress
+                        PortDescription = $port.Description
+                        SNMPEnabled     = $port.SNMPEnabled
+                        Shared          = $p.Shared
+                        Published       = $p.Published
+                        Comment         = $p.Comment
                     }
                 } catch {
                     Write-Verbose "Printer '$printer' not found on $srv. ($($_.Exception.Message))"
