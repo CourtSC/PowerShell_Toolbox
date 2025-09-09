@@ -360,7 +360,7 @@ function Get-ADPrinterGroups {
                 ('{0}{1}-{2}' -f $Prefix, $name, $DefaultMarker)
             )
 
-            foreach ($id in $ids) {
+            $output = foreach ($id in $ids) {
                 try {
                     Write-Verbose "Querying group: $id"
                     Get-ADGroup -Identity $id -Properties $effectiveProps @opt -ErrorAction Stop
@@ -369,6 +369,11 @@ function Get-ADPrinterGroups {
                 }
             }
         }
+        if (-not $output) {
+            $filterString = "*-PRN-$name*"
+            $output = Get-ADGroup -Filter { Name -like $filterString }
+        } 
+        return $output
     }
 }
 
@@ -1014,7 +1019,9 @@ function Get-ADGroupMemberships {
     }
 
     try {
-        $adObj = Get-ADComputer @splat | Select-Object -ExpandProperty MemberOf
+        $adObj = Get-ADComputer @splat -ErrorAction Ignore | Select-Object -ExpandProperty MemberOf 
+    } catch {}
+    try {
         if (-not $adObj) {
             $adObj = Get-ADUser @splat -ErrorAction Stop | Select-Object -ExpandProperty MemberOf
         }
@@ -1022,6 +1029,7 @@ function Get-ADGroupMemberships {
         Write-Error "AD Object not found for $($splat.Identity). ($($_.Exception.Message))"
     }
     
+    Write-Host "$Identity Group Memberships:"
     if ($Properties) {
         $groups = $adObj | ForEach-Object {
             Get-ADGroup $_ -Properties $Properties | Select-Object -Property $Properties
@@ -1751,16 +1759,34 @@ function Get-MHDPrinters {
 
         [Parameter()]
         [ValidateNotNullOrEmpty()]
-        [string[]]$Servers = @(
-            'ADCVPRNMHDMS001',
-            'ADCVPRNMHDMS002',
-            'ADCVPRNMHDMS003',
-            'ADCVPRNMHDMS004',
-            'ADCVPRNMHDMS005',
-            'ADCVPRNMHDMS006'
-        )
+        [string[]]$Servers = ('ADCVPRNMHDMS001', `
+                'ADCVPRNMHDMS002', `
+                'ADCVPRNMHDMS003', `
+                'ADCVPRNMHDMS004', `
+                'ADCVPRNMHDMS005', `
+                'ADCVPRNMHDMS006', `
+                'ADCVPRNMHDMS020', `
+                'ADCVPRNMHDMS021', `
+                'ADCVPRNMHDMS022', `
+                'ADCVPRNMHDMS023', `
+                'ADCVPRNMHDMS024', `
+                'ADCVPRNMHDMS030', `
+                'ADCVPRNMHDMS031', `
+                'ADCVPRNMHDMS040', `
+                'ADCVPRNMHDMS041', `
+                'ADCVPRNMHDMS050', `
+                'ADCVPRNMHDMS051', `
+                'ADCVPRNMHDMS052', `
+                'ADCVPRNMHDMS060', `
+                'ADCVPRNMHDMS061', `
+                'ADCVPRNMHDMS062', `
+                'ADCVPRNMHDMS070', `
+                'ADCVPRNMHDMS071', `
+                'ADCVPRNMHDMS080', `
+                'ADCVPRNMHDMS081')
     )
     begin {
+        Import-Module ActiveDirectory
         $total = $printers.count
         $count = 0
         function Get-Progress {
@@ -1795,20 +1821,43 @@ function Get-MHDPrinters {
                     Shared          = $p.Shared
                     Published       = $p.Published
                     Comment         = $p.Comment
+                    Location        = $p.Location
+                }
+                $filterString = "*-PRN-$($p.Name)*"
+                $groups = Get-ADGroup -Filter { Name -like $filterString } -ErrorAction Stop
+                foreach ($group in $groups) {
+                    if (($group.Name -like '*-DEF') -and ($group.Name -like '*-PRN-*')) {
+                        $output | Add-Member -NotePropertyName 'DefaultGroup' -NotePropertyValue $group.Name -Force
+                    } elseif ($group.Name -like '*-PRN-*') {
+                        $output | Add-Member -NotePropertyName 'StandardGroup' -NotePropertyValue $group.Name -Force
+                    }
                 }
             }
             return $output
         } else {
-            foreach ($printer in $Printers) {
+            $output = foreach ($printer in $Printers) {
                 foreach ($srv in $Servers) {
-                    Get-Progress -Total $total -Count $count -Message "Checking $($srv) for $($p.Name)..."
+                    Get-Progress -Total $total -Count $count -Message "Checking $($srv) for $($printer)..."
                     try {
                         $p = Get-Printer -ComputerName $srv -Name $printer -ErrorAction Stop
-                        $port = Get-PrinterPort -ComputerName $srv -Name $p.PortName -ErrorAction Stop
+                        if ($p) {
+                            $port = Get-PrinterPort -ComputerName $srv -Name $p.PortName -ErrorAction Stop
+                            $filterString = "*-PRN-$($p.Name)*"
+                            $groups = Get-ADGroup -Filter { Name -like $filterString } -ErrorAction Stop
+                            foreach ($group in $groups) {
+                                if (($group.Name -like '*-DEF') -and ($group.Name -like '*-PRN-*')) {
+                                    $defGroup = $group.Name
+                                } elseif ($group.Name -like '*-PRN-*') {
+                                    $stdGroup = $group.Name
+                                }
+                            }
+                        }
                         [pscustomobject]@{
-                            Server          = $srv
+                            Server          = $p.ComputerName
                             Name            = $p.Name
                             Status          = $p.PrinterStatus
+                            StandardGroup   = $stdGroup
+                            DefaultGroup    = $defGroup
                             DriverName      = $p.DriverName
                             PortName        = $p.PortName
                             HostAddress     = $port.PrinterHostAddress
@@ -1817,6 +1866,7 @@ function Get-MHDPrinters {
                             Shared          = $p.Shared
                             Published       = $p.Published
                             Comment         = $p.Comment
+                            Location        = $p.Location
                         }
                     } catch {
                         Write-Verbose "Printer '$printer' not found on $srv. ($($_.Exception.Message))"
@@ -1824,6 +1874,7 @@ function Get-MHDPrinters {
                 }
                 $count++
             }
+            return $output
         }
     }
 }

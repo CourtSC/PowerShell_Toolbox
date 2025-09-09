@@ -219,5 +219,3 @@ function Install-RemotePrintDriver {
         }
     }
 }
-Clear-Host
-Install-RemotePrintDriver
