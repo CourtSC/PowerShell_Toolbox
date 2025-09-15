@@ -4,6 +4,8 @@ if (-not (Get-Module -ListAvailable -Name 'ImportExcel')) {
     Write-Host 'ImportExcel module installed.'
 }
 
+Import-Module -Name ActiveDirectory
+
 # Use Type Accelerator to allow PSSession type.
 [PowerShell].Assembly.GetType('System.Management.Automation.TypeAccelerators')::add('PSSession', 'System.Management.Automation.Runspaces.PSSession')
 
@@ -177,7 +179,7 @@ function Get-InstalledPrinters {
         [Parameter(Mandatory, ParameterSetName = 'Session',
             ValueFromPipeline)]
         [ValidateNotNull()]
-        [PSSession[]]$Session,
+        [System.Management.Automation.Runspaces.PSSession[]]$Session,
 
         [Parameter()]
         [switch]$ResolveUser,
@@ -333,6 +335,7 @@ function Get-ADPrinterGroups {
     )
 
     begin {
+        Import-Module -Name ActiveDirectory
         # normalize SearchScope for Get-ADGroup if provided
         $opt = @{}
         if ($PSBoundParameters.ContainsKey('Server')) { $opt.Server = $Server }
@@ -760,7 +763,7 @@ function Get-InstalledSoftware {
         [string[]]$ComputerName,
 
         [Parameter(Mandatory = $true, ParameterSetName = 'Session')]
-        [PSSession[]]$Session,
+        [System.Management.Automation.Runspaces.PSSession[]]$Session,
 
         [string]$Filter
     )
@@ -858,7 +861,7 @@ function Remove-Software {
         [string[]]$ComputerName,
 
         [Parameter(Mandatory = $true, ParameterSetName = 'Session')]
-        [PSSession[]]$Session,
+        [System.Management.Automation.Runspaces.PSSession[]]$Session,
 
         [Parameter()]
         [string]$GUID,
@@ -1809,10 +1812,21 @@ function Get-MHDPrinters {
                 $count++
                 Get-Progress -Total $total -Count $count -Message "Checking $($p.ComputerName) for $($p.Name)..."
                 $port = Get-PrinterPort -ComputerName $p.ComputerName -Name $p.PortName -ErrorAction Stop
+                $filterString = "*-PRN-$($p.Name)*"
+                $groups = Get-ADGroup -Filter { Name -like $filterString } -ErrorAction Stop
+                foreach ($group in $groups) {
+                    if (($group.Name -like '*-DEF') -and ($group.Name -like '*-PRN-*')) {
+                        $defGroup = $group.Name
+                    } elseif ($group.Name -like '*-PRN-*') {
+                        $stdGroup = $group.Name
+                    }
+                }
                 [pscustomobject]@{
                     Server          = $p.ComputerName
                     Name            = $p.Name
                     Status          = $p.PrinterStatus
+                    StandardGroup   = $stdGroup
+                    DefaultGroup    = $defGroup
                     DriverName      = $p.DriverName
                     PortName        = $p.PortName
                     HostAddress     = $port.PrinterHostAddress
@@ -1822,15 +1836,6 @@ function Get-MHDPrinters {
                     Published       = $p.Published
                     Comment         = $p.Comment
                     Location        = $p.Location
-                }
-                $filterString = "*-PRN-$($p.Name)*"
-                $groups = Get-ADGroup -Filter { Name -like $filterString } -ErrorAction Stop
-                foreach ($group in $groups) {
-                    if (($group.Name -like '*-DEF') -and ($group.Name -like '*-PRN-*')) {
-                        $output | Add-Member -NotePropertyName 'DefaultGroup' -NotePropertyValue $group.Name -Force
-                    } elseif ($group.Name -like '*-PRN-*') {
-                        $output | Add-Member -NotePropertyName 'StandardGroup' -NotePropertyValue $group.Name -Force
-                    }
                 }
             }
             return $output
