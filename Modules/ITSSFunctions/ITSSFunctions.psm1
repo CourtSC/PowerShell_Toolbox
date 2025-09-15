@@ -1812,21 +1812,10 @@ function Get-MHDPrinters {
                 $count++
                 Get-Progress -Total $total -Count $count -Message "Checking $($p.ComputerName) for $($p.Name)..."
                 $port = Get-PrinterPort -ComputerName $p.ComputerName -Name $p.PortName -ErrorAction Stop
-                $filterString = "*-PRN-$($p.Name)*"
-                $groups = Get-ADGroup -Filter { Name -like $filterString } -ErrorAction Stop
-                foreach ($group in $groups) {
-                    if (($group.Name -like '*-DEF') -and ($group.Name -like '*-PRN-*')) {
-                        $defGroup = $group.Name
-                    } elseif ($group.Name -like '*-PRN-*') {
-                        $stdGroup = $group.Name
-                    }
-                }
                 [pscustomobject]@{
                     Server          = $p.ComputerName
                     Name            = $p.Name
                     Status          = $p.PrinterStatus
-                    StandardGroup   = $stdGroup
-                    DefaultGroup    = $defGroup
                     DriverName      = $p.DriverName
                     PortName        = $p.PortName
                     HostAddress     = $port.PrinterHostAddress
@@ -1836,6 +1825,15 @@ function Get-MHDPrinters {
                     Published       = $p.Published
                     Comment         = $p.Comment
                     Location        = $p.Location
+                }
+                $filterString = "*-PRN-$($p.Name)*"
+                $groups = Get-ADGroup -Filter { Name -like $filterString } -ErrorAction Stop
+                foreach ($group in $groups) {
+                    if (($group.Name -like '*-DEF') -and ($group.Name -like '*-PRN-*')) {
+                        $output | Add-Member -NotePropertyName 'DefaultGroup' -NotePropertyValue $group.Name -Force
+                    } elseif ($group.Name -like '*-PRN-*') {
+                        $output | Add-Member -NotePropertyName 'StandardGroup' -NotePropertyValue $group.Name -Force
+                    }
                 }
             }
             return $output
@@ -1883,7 +1881,6 @@ function Get-MHDPrinters {
         }
     }
 }
-
 
 function Install-RemotePrintDriver {
     <#
@@ -2337,6 +2334,135 @@ function Set-PrinterPort {
             PortRecreated = $recreated
             Success       = $success
             Message       = $msg
+        }
+    }
+}
+
+function Remove-ADObjects {
+    <#
+    .SYNOPSIS
+    Removes one or more Active Directory computer objects (optionally recursive), with full WhatIf/Confirm support.
+
+    .DESCRIPTION
+    For each provided computer identity, this function resolves the AD computer object and deletes it using
+    Remove-ADObject -Recursive. It is wrapped in SupportsShouldProcess so -WhatIf/-Confirm behave as expected.
+    The supplied -Credential is used for both lookup (Get-ADComputer) and deletion.
+
+    Emits a structured result per input with Name, DistinguishedName, Removed, and Message, so you can log or export
+    outcomes cleanly.
+
+    .PARAMETER ComputerName
+    Computer identity to remove. Accepts Name, DistinguishedName, GUID, or SID. Supports pipeline and
+    property-based pipeline input (e.g., objects with ComputerName/Name/DNSHostName).
+
+    .PARAMETER Credential
+    Credentials to use for the AD query and deletion.
+
+    .PARAMETER Server
+    Domain controller or AD LDS instance to target.
+
+    .PARAMETER SearchBase
+    Distinguished name (DN) of the container/OU to scope the lookup.
+
+    .PARAMETER SearchScope
+    Specifies the search scope: Base, OneLevel, or Subtree.
+
+    .INPUTS
+    System.String
+    You can pipe strings or objects with a ComputerName/Name/DNSHostName property.
+
+    .OUTPUTS
+    System.Management.Automation.PSCustomObject
+    Fields: Name, DistinguishedName, Removed (Boolean), Message
+
+    .EXAMPLES
+    # Remove a single computer with confirmation
+    PS> Remove-ADObjects -ComputerName 'WS-123' -Credential (Get-Credential)
+
+    # Dry-run multiple deletions
+    PS> 'WS-1','WS-2','WS-3' | Remove-ADObjects -Credential (Get-Credential) -WhatIf
+
+    # Scoped removal from a specific OU
+    PS> Remove-ADObjects -ComputerName 'WS-999' -Credential (Get-Credential) `
+    >> -Server 'dc01.contoso.com' -SearchBase 'OU=Workstations,DC=contoso,DC=com'
+    #>
+
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    [OutputType([pscustomobject])]
+    param (
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [Alias('Name', 'DNSHostName')]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$ComputerName,
+
+        [Parameter(Mandatory, Position = 1)]
+        [ValidateNotNull()]
+        [pscredential]$Credential,
+
+        [Parameter()]
+        [string]$Server,
+
+        [Parameter()]
+        [string]$SearchBase,
+
+        [Parameter()]
+        [ValidateSet('Base', 'OneLevel', 'Subtree')]
+        [string]$SearchScope
+    )
+
+    begin {
+        # Build an optional splat for scoping parameters; reused on both AD calls.
+        $scope = @{}
+        if ($PSBoundParameters.ContainsKey('Server')) { $scope.Server = $Server }
+        if ($PSBoundParameters.ContainsKey('SearchBase')) { $scope.SearchBase = $SearchBase }
+        if ($PSBoundParameters.ContainsKey('SearchScope')) { $scope.SearchScope = $SearchScope }
+    }
+
+    process {
+        foreach ($comp in $ComputerName) {
+            $dn = $null
+            try {
+                # Resolve the computer; -Identity accepts Name, DN, GUID, SID
+                $adComp = Get-ADComputer -Identity $comp -Credential $Credential @scope -ErrorAction Stop
+                $dn = $adComp.DistinguishedName
+            } catch {
+                [pscustomobject]@{
+                    Name              = $comp
+                    DistinguishedName = $null
+                    Removed           = $false
+                    Message           = "Not found or inaccessible: $($_.Exception.Message)"
+                }
+                continue
+            }
+
+            # Confirm deletion with ShouldProcess (honors -WhatIf / -Confirm)
+            if ($PSCmdlet.ShouldProcess($dn, 'Remove AD object recursively')) {
+                try {
+                    # Remove-ADObject supports -Credential and -Recursive
+                    Remove-ADObject -Identity $dn -Recursive -Credential $Credential @scope -ErrorAction Stop -Confirm:$false
+
+                    [pscustomobject]@{
+                        Name              = $adComp.Name
+                        DistinguishedName = $dn
+                        Removed           = $true
+                        Message           = 'Deleted.'
+                    }
+                } catch {
+                    [pscustomobject]@{
+                        Name              = $adComp.Name
+                        DistinguishedName = $dn
+                        Removed           = $false
+                        Message           = "Deletion failed: $($_.Exception.Message)"
+                    }
+                }
+            } else {
+                [pscustomobject]@{
+                    Name              = $adComp.Name
+                    DistinguishedName = $dn
+                    Removed           = $false
+                    Message           = 'Skipped by user (-WhatIf or -Confirm).'
+                }
+            }
         }
     }
 }
