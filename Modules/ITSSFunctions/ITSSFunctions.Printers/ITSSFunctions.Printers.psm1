@@ -945,3 +945,476 @@ function Set-PrinterPort {
         }
     }
 }
+
+function Get-InstalledPrinters {
+    <#
+    .SYNOPSIS
+    Lists per-user printer connections from one or more computers or PSSessions.
+
+    .DESCRIPTION
+    Enumerates registry keys under HKEY_USERS\<SID>\Printers\Connections on the target system(s) to report
+    installed (connected) printers for each user profile. Works against:
+    - One or more computer names via PowerShell remoting, or
+    - One or more existing PSSessions.
+
+    For each connection, returns a structured object with ComputerName, SID, (optionally) resolved User name,
+    and the connection name (Printer).
+
+    .PARAMETER ComputerName
+    One or more remote computer names to query via PowerShell remoting. Accepts pipeline input.
+    Requires WinRM connectivity and appropriate permissions.
+
+    .PARAMETER Session
+    One or more existing PSSessions to use for the query. Accepts pipeline input.
+
+    .PARAMETER ResolveUser
+    When specified, attempts to resolve each SID to an NTAccount (DOMAIN\User). If resolution fails,
+    the SID is returned as-is.
+
+    .PARAMETER ThrottleLimit
+    Maximum number of concurrent remote calls when using -ComputerName. Default is 16.
+
+    .PARAMETER Credential
+    Specifies a user account that has permission to run the command on the remote computer(s).
+    Only applicable with -ComputerName. When defined with the [Credential()] attribute and supplied
+    without a value, you will be prompted for credentials.
+
+    .INPUTS
+    System.String, Microsoft.PowerShell.Commands.PSSession
+    You can pipe computer names or PSSession objects.
+
+    .OUTPUTS
+    System.Management.Automation.PSCustomObject
+    Each object includes: ComputerName, SID, User (if -ResolveUser), and Printer.
+
+    .EXAMPLES
+    Example 1: Query a single computer
+    PS> Get-InstalledPrinters -ComputerName 'PC01'
+
+    Example 2: Query multiple computers with resolved users
+    PS> 'PC01','PC02' | Get-InstalledPrinters -ResolveUser
+
+    Example 3: Use existing sessions
+    PS> $s = New-PSSession -ComputerName 'PC01','PC02'
+    PS> Get-InstalledPrinters -Session $s
+
+    Example 4: Capture and export
+    PS> Get-InstalledPrinters -ComputerName 'PC01','PC02' -ResolveUser | Export-Csv printers.csv -NoTypeInformation
+
+    Example 5: Use alternate credentials
+    PS> Get-InstalledPrinters -ComputerName 'PC01','PC02' -Credential (Get-Credential)
+
+    .NOTES
+    Reads HKU (user hives) on target machines: HKEY_USERS\<SID>\Printers\Connections.
+    Per-machine printers under HKLM are not included. Requires appropriate permissions.
+    Errors during remote enumeration are reported via Write-Error but do not stop other targets.
+    When -Session is used, -Credential is ignored because the PSSession encapsulates authentication.
+
+    .LINK
+    about_Remote
+    .LINK
+    about_Registry_Provider
+    .LINK
+    about_CommonParameters
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'ComputerName')]
+    [OutputType([pscustomobject])]
+    param (
+        [Parameter(Mandatory, ParameterSetName = 'ComputerName',
+            ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('CN', 'Server')]
+        [string[]]$ComputerName,
+
+        [Parameter(Mandatory, ParameterSetName = 'Session',
+            ValueFromPipeline)]
+        [ValidateNotNull()]
+        [System.Management.Automation.Runspaces.PSSession[]]$Session,
+
+        [Parameter()]
+        [switch]$ResolveUser,
+
+        [Parameter(ParameterSetName = 'ComputerName')]
+        [ValidateRange(1, 128)]
+        [int]$ThrottleLimit = 16,
+
+        [Parameter(ParameterSetName = 'ComputerName')]
+        [Alias('Cred')]
+        [pscredential]$Credential
+    )
+
+    begin {
+        # Script block executed on remote targets
+        $scriptBlock = {
+            param([switch]$ResolveUser)
+
+            try {
+                $sids = Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction Stop |
+                    Where-Object { $_.PSChildName -match '^S-\d-\d+-(\d+-){1,14}\d+$' }
+
+                foreach ($sid in $sids) {
+                    $keyPath = "Registry::$($sid.Name)\Printers\Connections"
+                    if (Test-Path $keyPath) {
+                        foreach ($conn in (Get-ChildItem $keyPath -ErrorAction SilentlyContinue)) {
+                            $user = $sid.PSChildName
+                            if ($ResolveUser) {
+                                try {
+                                    $sidObj = [System.Security.Principal.SecurityIdentifier]$sid.PSChildName
+                                    $user = $sidObj.Translate([System.Security.Principal.NTAccount]).Value
+                                } catch { } # fall back to SID if translation fails
+                            }
+
+                            [pscustomobject]@{
+                                PSTypeName   = 'AdventHealth.Prints.Connection'
+                                ComputerName = $env:COMPUTERNAME
+                                SID          = $sid.PSChildName
+                                User         = $user
+                                Printer      = $conn.PSChildName
+                            }
+                        }
+                    }
+                }
+            } catch {
+                Write-Error -ErrorRecord $_
+            }
+        }
+    }
+
+    process {
+        if ($PSCmdlet.ParameterSetName -eq 'Session') {
+            foreach ($s in $Session) {
+                try {
+                    Invoke-Command -Session $s -ScriptBlock $scriptBlock -ArgumentList $ResolveUser -ErrorAction Stop
+                } catch {
+                    Write-Error -ErrorRecord $_
+                }
+            }
+        } else {
+            try {
+                Invoke-Command -ComputerName $ComputerName -Credential $Credential -ScriptBlock $scriptBlock -ArgumentList $ResolveUser -ThrottleLimit $ThrottleLimit -ErrorAction Stop
+            } catch {
+                Write-Error -ErrorRecord $_
+            }
+        }
+    }
+}
+function Get-ADPrinterGroups {
+    <#
+    .SYNOPSIS
+    Gets the standard and default Active Directory groups for one or more printer names.
+
+    .DESCRIPTION
+    For each printer name, this function looks up two AD groups based on your naming convention:
+    - Standard group: <Prefix><PrinterName>
+    - Default group : <Prefix><PrinterName>-<DefaultMarker>
+
+    By default, Prefix is 'ORL-PRN-' and DefaultMarker is 'DEF'. The function returns any groups
+    that exist and ignores missing ones (reported via -Verbose). You can request additional AD
+    properties with -Properties; the function will also include Description and info unless you
+    request '*' (all properties).
+
+    .PARAMETER PrinterName
+    One or more printer names. Accepts pipeline input and property-based pipeline (Printer/Name).
+
+    .PARAMETER Properties
+    Additional AD group properties to retrieve. If '*' is specified, all properties are returned.
+    Otherwise the function ensures 'Description' and 'info' are included.
+
+    .PARAMETER Prefix
+    The naming prefix for printer groups (default: 'ORL-PRN-').
+
+    .PARAMETER DefaultMarker
+    The suffix that identifies default groups (default: 'DEF').
+
+    .PARAMETER Server
+    Domain controller or AD LDS instance to query.
+
+    .PARAMETER SearchBase
+    Distinguished name (DN) that limits the search to a specific OU/container.
+
+    .PARAMETER SearchScope
+    Base, OneLevel, or Subtree.
+
+    .INPUTS
+    System.String
+
+    .OUTPUTS
+    Microsoft.ActiveDirectory.Management.ADGroup
+
+    .EXAMPLES
+    PS> Get-ADPrinterGroups -PrinterName 'IBJ9' -Verbose
+    PS> 'IBJ9','HP-5100' | Get-ADPrinterGroups -Properties ManagedBy
+    PS> Get-ADPrinterGroups -PrinterName 'X123' -Prefix 'MCO-PRN-' -DefaultMarker 'DEFAULT'
+    PS> Get-ADPrinterGroups -PrinterName 'HP-Color' -Server 'dc01.contoso.com' -SearchBase 'OU=Print,DC=contoso,DC=com'
+
+    .NOTES
+    Requires RSAT ActiveDirectory module (Get-ADGroup).
+    .LINK
+    Get-ADGroup
+    about_ActiveDirectory
+    about_CommonParameters
+    #>
+    [CmdletBinding()]
+    [OutputType([Microsoft.ActiveDirectory.Management.ADGroup])]
+    param (
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [Alias('Printer', 'Name')]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$PrinterName,
+
+        [Parameter()]
+        [string[]]$Properties = @(),
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$Prefix = 'ORL-PRN-',
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$DefaultMarker = 'DEF',
+
+        [Parameter()]
+        [string]$Server,
+
+        [Parameter()]
+        [string]$SearchBase,
+
+        [Parameter()]
+        [ValidateSet('Base', 'OneLevel', 'Subtree')]
+        [string]$SearchScope
+    )
+
+    begin {
+        Import-Module -Name ActiveDirectory
+        # normalize SearchScope for Get-ADGroup if provided
+        $opt = @{}
+        if ($PSBoundParameters.ContainsKey('Server')) { $opt.Server = $Server }
+        if ($PSBoundParameters.ContainsKey('SearchBase')) { $opt.SearchBase = $SearchBase }
+        if ($PSBoundParameters.ContainsKey('SearchScope')) { $opt.SearchScope = $SearchScope }
+        
+        # ---- Normalize $Properties ----
+        if ($Properties -is [string]) {
+            $Properties = $Properties -split '\s*,\s*' | Where-Object { $_ }
+        }
+        $Properties = @($Properties)  # ensure array
+    
+        $effectiveProps = if ($Properties -contains '*') { '*' } else {
+            @($Properties + 'Description' + 'info' | Select-Object -Unique)
+        }
+    }
+
+    process {
+        foreach ($name in $PrinterName) {
+            if (-not $name) { continue }
+
+            # Build the two identities we want to try
+            $ids = @(
+                ('{0}{1}' -f $Prefix, $name),
+                ('{0}{1}-{2}' -f $Prefix, $name, $DefaultMarker)
+            )
+
+            $output = foreach ($id in $ids) {
+                try {
+                    Write-Verbose "Querying group: $id"
+                    Get-ADGroup -Identity $id -Properties $effectiveProps @opt -ErrorAction Stop
+                } catch {
+                    Write-Verbose "Group not found or inaccessible: $id ($($_.Exception.Message))"
+                }
+            }
+        }
+        if (-not $output) {
+            $filterString = "*-PRN-$name*"
+            $output = Get-ADGroup -Filter { Name -like $filterString }
+        } 
+        return $output
+    }
+}
+
+
+function Get-ADPrinters {
+    <#
+    .SYNOPSIS
+    Retrieves Active Directory printer objects from specified print servers and exports the results to Excel.
+
+    .DESCRIPTION
+    The Get-ADPrinters function queries a list of print servers for installed printers, then searches Active Directory for matching printQueue objects. It supports filtering by creation date, either by specifying a number of months ago or a specific date. The results are exported to an Excel file, with a prompt to close Excel if it is running.
+
+    .PARAMETER Domain
+    Specifies the Active Directory domain to query. Defaults to 'flhosp.net'. If set to 'multihosp.net', the function uses a different set of print servers.
+
+    .PARAMETER CreatedMonthsAgo
+    Filters printers created within the specified number of months from the current date. Mutually exclusive with CreatedAfter.
+
+    .PARAMETER CreatedAfter
+    Filters printers created after the specified date (in a format recognized by Get-Date). Mutually exclusive with CreatedMonthsAgo.
+
+    .PARAMETER Servers
+    An array of print server names to query. Defaults to a predefined list based on the selected domain.
+
+    .EXAMPLE
+    Get-ADPrinters -CreatedMonthsAgo 6
+
+    Retrieves printers created in the last 6 months from the default domain and exports the results to Excel.
+
+    .EXAMPLE
+    Get-ADPrinters -CreatedAfter '2024-01-01' -Domain 'multihosp.net'
+
+    Retrieves printers created after January 1, 2024, from the 'multihosp.net' domain and exports the results to Excel.
+
+    .NOTES
+    - Requires the ActiveDirectory and ImportExcel modules.
+    - Prompts the user to close Excel before exporting data.
+    - Output is saved to "$env:HOMEPATH\Documents\AD_Printer_Export.xlsx".
+    #>
+
+
+    [CmdletBinding(DefaultParameterSetName = 'CreatedAfter')]
+    param(
+        [string]$Domain = 'flhosp.net',
+        [Parameter(ParameterSetName = 'CreatedMonthsAgo')]
+        [Int32]$CreatedMonthsAgo,
+        [Parameter(ParameterSetName = 'CreatedAfter')]
+        [string]$CreatedAfter,
+        [string[]]$Servers = ('FHOSVMWPRN001', `
+                'FHOSVMWPRN002', `
+                'FHOSVMWPRN003', `
+                'FHOSVMWPRN004', `
+                'FHOSVMWPRN005', `
+                'FHOSVMWPRN006', `
+                'FHOVPRNA001', `
+                'FHOVPRNB001', `
+                'FHOVPRNC001', `
+                'FHOVPRND001', `
+                'FHOVPRNE001', `
+                'FHOVPRNF001')
+    )
+
+    if ($Domain -eq 'multihosp.net') {
+        $Servers = ('ADCVPRNMHDMS001', `
+                'ADCVPRNMHDMS002', `
+                'ADCVPRNMHDMS003', `
+                'ADCVPRNMHDMS004', `
+                'ADCVPRNMHDMS005', `
+                'ADCVPRNMHDMS006', `
+                'ADCVPRNMHDMS020', `
+                'ADCVPRNMHDMS021', `
+                'ADCVPRNMHDMS022', `
+                'ADCVPRNMHDMS023', `
+                'ADCVPRNMHDMS024', `
+                'ADCVPRNMHDMS030', `
+                'ADCVPRNMHDMS031', `
+                'ADCVPRNMHDMS040', `
+                'ADCVPRNMHDMS041', `
+                'ADCVPRNMHDMS050', `
+                'ADCVPRNMHDMS051', `
+                'ADCVPRNMHDMS052', `
+                'ADCVPRNMHDMS060', `
+                'ADCVPRNMHDMS061', `
+                'ADCVPRNMHDMS062', `
+                'ADCVPRNMHDMS070', `
+                'ADCVPRNMHDMS071', `
+                'ADCVPRNMHDMS080', `
+                'ADCVPRNMHDMS081')
+    }
+
+    # Initialize variables.
+    $results = @()
+    $printers = $Servers | ForEach-Object -Parallel { Get-Printer -ComputerName $_ | Sort-Object | Select-Object Name }
+    $props = ('whenCreated', 'ServerName', 'Description', 'Location', 'PortName')
+    
+    if ($CreatedMonthsAgo) {
+        $WorkSheetName = 'Last {0} Months' -f $CreatedMonthsAgo
+        foreach ($printer in $printers) {
+            $filter = "ObjectClass -like 'printQueue' -and Name -like '*$($printer.Name)*'"
+            $printerObj = Get-ADObject -Filter $filter -Server $Domain -Properties $props | Where-Object whenCreated -GT (Get-Date).AddMonths("-$CreatedMonthsAgo").Date
+            if ($printerObj.whenCreated -gt (Get-Date).AddMonths("-$CreatedMonthsAgo").Date) {
+                $results += [PSCustomObject]@{
+                    'Name'        = $printerObj.Name
+                    'Port'        = $printerObj.PortName[0]
+                    'Server'      = $printerObj.ServerName
+                    'Create Date' = $printerObj.whenCreated
+                    'Location'    = $printerObj.Location
+                    'Description' = $printerObj.Description
+                }
+            }
+        }
+
+        Stop-ExcelProcess
+        $results | Export-Excel -Path "$env:HOMEPATH\Documents\AD_Printer_Export.xlsx" -WorksheetName $WorkSheetName -AutoSize -TableName $WorkSheetName -ClearSheet
+        Write-Host "Output saved to $env:HOMEPATH\Documents\AD_Printer_Export.xlsx"
+    } elseif ($CreatedAfter) {
+        $WorkSheetName = 'Created After {0}' -f $CreatedAfter
+        foreach ($printer in $printers) {
+            $filter = "ObjectClass -like 'printQueue' -and Name -like '*{0}*'" -f $printer.Name
+            $printerObj = Get-ADObject -Filter $filter -Server $Domain -Properties $props | Where-Object whenCreated -GT (Get-Date $CreatedAfter).Date
+            if ($printerObj.whenCreated -gt (Get-Date $CreatedAfter).Date) {
+                $results += [PSCustomObject]@{
+                    'Name'        = $printerObj.Name
+                    'Port'        = $printerObj.PortName[0]
+                    'Server'      = $printerObj.ServerName
+                    'Create Date' = $printerObj.whenCreated
+                    'Location'    = $printerObj.Location
+                    'Description' = $printerObj.Description
+                }
+            }
+        }
+
+        Stop-ExcelProcess
+        $results | Export-Excel -Path "$env:HOMEPATH\Documents\AD_Printer_Export.xlsx" -WorksheetName $WorkSheetName -AutoSize -TableName $WorkSheetName -ClearSheet
+        Write-Host "Output saved to $env:HOMEPATH\Documents\AD_Printer_Export.xlsx"
+    } else {
+        foreach ($printer in $printers) {
+            $filter = "ObjectClass -like 'printQueue' -and Name -like '*" + $printer.Name + "*'"
+            $printerObj = Get-ADObject -Filter $filter -Server $Domain -Properties $props
+            if ($printerObj) {
+                $results += [PSCustomObject]@{
+                    'Name'        = $printerObj.Name
+                    'Port'        = $printerObj.PortName[0]
+                    'Server'      = $printerObj.ServerName
+                    'Create Date' = $printerObj.whenCreated
+                    'Location'    = $printerObj.Location
+                    'Description' = $printerObj.Description
+                }
+            }
+        }
+        Stop-ExcelProcess
+        $results | Export-Excel -Path "$env:HOMEPATH\Documents\AD_Printer_Export.xlsx" -WorksheetName 'All Printers' -AutoSize -TableName 'All Printers' -ClearSheet
+        Write-Host "Output saved to $env:HOMEPATH\Documents\AD_Printer_Export.xlsx"
+    }
+}
+
+function Repair-Printer {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory, Position = 0)]
+        [string[]]
+        $Name
+    )
+
+    begin {
+        $printerHash = @{}
+        $props = @('ComputerName', 'Name', 'Location', 'Comment', 'DriverName', 'ShareName', 'Shared', 'PortName')
+    }
+
+    process {
+        $printer = $mhdPrintServers | ForEach-Object -Parallel { 
+            Get-Printer -ComputerName $_ -Name $Name -ErrorAction SilentlyContinue | Select-Object $props 
+        }
+
+        if ($printer) {
+            $printer.psobject.Properties | ForEach-Object {
+                $printerHash[$_.Name] = $_.Value
+            }
+            try {
+                # Remove-Printer isn't working for some reason...
+                $removeResult = Remove-Printer -ComputerName $printer.ComputerName -Name $printer.Name -ErrorAction Stop
+            } catch {
+                Write-Error "Failed to remove $($printer.Name) from $($printer.ComputerName): ($($_.Exception.Message))"
+            }
+
+            if ($removeResult) {
+                Add-Printer @printerHash
+            }
+        }
+    }
+}
