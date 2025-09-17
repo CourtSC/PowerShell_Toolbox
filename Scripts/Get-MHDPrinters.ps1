@@ -20,7 +20,7 @@ One or more print server names to query. Defaults to the MHD fleet listed above.
 Maximum number of parallel jobs. Default: 12.
 
 .PARAMETER NoProgress
-Suppress the Write-Progress UI.
+Suppress the Write-Progress UI. Note: progress is shown only when -Verbose is used; -NoProgress suppresses it even then.
 
 .PARAMETER ServerTimeoutSec
 Timeout (in seconds) for each server/printer job. Default: 60.
@@ -29,7 +29,7 @@ Timeout (in seconds) for each server/printer job. Default: 60.
 PS> Get-MHDPrinters -Printers 'HP123','CanonX'
 
 .EXAMPLE
-PS> 'HP123' | Get-MHDPrinters -ThrottleLimit 24
+PS> 'HP123' | Get-MHDPrinters -ThrottleLimit 24 -Verbose
 
 .NOTES
 Requires the PrintManagement and ActiveDirectory modules.
@@ -65,6 +65,9 @@ Get-Printer
     )
 
     begin {
+        # Show progress only when -Verbose is supplied; allow -NoProgress to suppress even then
+        $ShowProgress = ($PSBoundParameters['Verbose']) -and (-not $NoProgress)
+
         # Load modules in parent runspace (also import inside jobs)
         Import-Module PrintManagement -ErrorAction Stop
         Import-Module ActiveDirectory -ErrorAction Stop
@@ -73,8 +76,8 @@ Get-Printer
             param($Server, $TimeoutSec)
 
             # Ensure modules exist in worker
-            Import-Module PrintManagement -ErrorAction Stop
-            Import-Module ActiveDirectory -ErrorAction Stop
+            # Import-Module PrintManagement -ErrorAction Stop
+            # Import-Module ActiveDirectory -ErrorAction Stop
 
             try {
                 # Get all printers once
@@ -136,8 +139,8 @@ Get-Printer
         $jobScriptPrinterOnServer = {
             param($Server, $Printer, $TimeoutSec)
 
-            Import-Module PrintManagement -ErrorAction Stop
-            Import-Module ActiveDirectory -ErrorAction Stop
+            # Import-Module PrintManagement -ErrorAction Stop
+            # Import-Module ActiveDirectory -ErrorAction Stop
 
             try {
                 $p = Get-Printer -ComputerName $Server -Name $Printer -ErrorAction Stop
@@ -205,7 +208,7 @@ Get-Printer
         $started = 0
         $completed = 0
 
-        if (-not $NoProgress) {
+        if ($ShowProgress) {
             Write-Progress -Id 1 -Activity 'Querying print servers' -Status 'Starting...' -PercentComplete 0
         }
 
@@ -226,7 +229,7 @@ Get-Printer
             if ($ready) {
                 $ready | Receive-Job -Keep | Write-Output
                 $completed += $ready.Count
-                if (-not $NoProgress) {
+                if ($ShowProgress) {
                     $pct = [math]::Min(100, [math]::Round(($completed / [math]::Max(1, $total)) * 100, 2))
                     $status = "$completed of $total finished"
                     Write-Progress -Id 1 -Activity 'Querying print servers' -Status $status -PercentComplete $pct -CurrentOperation ($ready[-1].Name)
@@ -244,7 +247,7 @@ Get-Printer
             if ($more) { $more | Write-Output }
         }
 
-        if (-not $NoProgress) {
+        if ($ShowProgress) {
             Write-Progress -Id 1 -Activity 'Querying print servers' -Completed
         }
     }
