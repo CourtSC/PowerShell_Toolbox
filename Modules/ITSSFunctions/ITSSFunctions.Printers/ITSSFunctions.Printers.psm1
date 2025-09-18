@@ -7,8 +7,10 @@ Gets printer information from a set of MHD print servers.
 Queries one or more print servers for one or more specified printer names.
 By default, queries the MHD print servers (ADCVPRNMHDMS001–006, 020–024, 030–031, 040–041, 050–052, 060–062, 070–071, 080–081).
 
-Runs work in parallel using thread jobs (fast and progress-safe). Progress is reported from the parent runspace.
-Returns structured objects with server, printer, driver, port, and AD group info.
+Runs work in parallel using thread jobs (fast and progress-safe). Progress is reported from the parent runspace if `-Verbose` is set.  
+Returns structured objects with server, printer, driver, port, and AD group info.  
+
+If `-NoPort` is specified, the function skips network port lookups (faster, but omits `HostAddress`, `PortDescription`, and `SNMPEnabled`).
 
 .PARAMETER Printers
 One or more printer names to look up. Accepts pipeline input.
@@ -22,11 +24,14 @@ Maximum number of parallel jobs. Default: 12.
 .PARAMETER NoProgress
 Suppress the Write-Progress UI. Note: progress is shown only when -Verbose is used; -NoProgress suppresses it even then.
 
+.PARAMETER NoPort
+Skips printer port lookups for speed. `HostAddress`, `PortDescription`, and `SNMPEnabled` will be null.
+
 .PARAMETER ServerTimeoutSec
 Timeout (in seconds) for each server/printer job. Default: 60.
 
 .EXAMPLE
-PS> Get-MHDPrinters -Printers 'HP123','CanonX'
+PS> Get-MHDPrinters -Printers 'HP123','CanonX' -NoPort
 
 .EXAMPLE
 PS> 'HP123' | Get-MHDPrinters -ThrottleLimit 24 -Verbose
@@ -60,6 +65,8 @@ Get-Printer
 
         [switch]$NoProgress,
 
+        [switch]$NoPort,
+
         [ValidateRange(5, 600)]
         [int]$ServerTimeoutSec = 60
     )
@@ -73,34 +80,33 @@ Get-Printer
         Import-Module ActiveDirectory -ErrorAction Stop
 
         $jobScriptEnumerateServer = {
-            param($Server, $TimeoutSec)
+            param($Server, $TimeoutSec, $SkipPort)
 
-            # Ensure modules exist in worker
             # Import-Module PrintManagement -ErrorAction Stop
             # Import-Module ActiveDirectory -ErrorAction Stop
 
             try {
-                # Get all printers once
                 $printers = Get-Printer -ComputerName $Server -ErrorAction Stop
 
-                # Build a map of ports once per server
                 $ports = @{}
-                try {
-                    foreach ($prt in (Get-PrinterPort -ComputerName $Server -ErrorAction Stop)) {
-                        $ports[$prt.Name] = $prt
-                    }
-                } catch {
-                    # Port enumeration may fail; we'll try per-printer fallback below if needed
+                if (-not $SkipPort) {
+                    try {
+                        foreach ($prt in (Get-PrinterPort -ComputerName $Server -ErrorAction Stop)) {
+                            $ports[$prt.Name] = $prt
+                        }
+                    } catch { }
                 }
 
                 foreach ($p in $printers) {
                     $port = $null
-                    if ($ports.ContainsKey($p.PortName)) {
-                        $port = $ports[$p.PortName]
-                    } else {
-                        try {
-                            $port = Get-PrinterPort -ComputerName $Server -Name $p.PortName -ErrorAction Stop
-                        } catch { }
+                    if (-not $SkipPort) {
+                        if ($ports.ContainsKey($p.PortName)) {
+                            $port = $ports[$p.PortName]
+                        } else {
+                            try {
+                                $port = Get-PrinterPort -ComputerName $Server -Name $p.PortName -ErrorAction Stop
+                            } catch { }
+                        }
                     }
 
                     $filterString = "*-PRN-$($p.Name)*"
@@ -137,7 +143,7 @@ Get-Printer
         }
 
         $jobScriptPrinterOnServer = {
-            param($Server, $Printer, $TimeoutSec)
+            param($Server, $Printer, $TimeoutSec, $SkipPort)
 
             # Import-Module PrintManagement -ErrorAction Stop
             # Import-Module ActiveDirectory -ErrorAction Stop
@@ -150,9 +156,11 @@ Get-Printer
             }
 
             $port = $null
-            try {
-                $port = Get-PrinterPort -ComputerName $Server -Name $p.PortName -ErrorAction Stop
-            } catch { }
+            if (-not $SkipPort) {
+                try {
+                    $port = Get-PrinterPort -ComputerName $Server -Name $p.PortName -ErrorAction Stop
+                } catch { }
+            }
 
             $filterString = "*-PRN-$($p.Name)*"
             $stdGroup = $null
@@ -203,7 +211,6 @@ Get-Printer
     end {
         $jobs = @()
 
-        # Start jobs (bounded by ThrottleLimit using a simple queue)
         $total = $work.Count
         $started = 0
         $completed = 0
@@ -213,18 +220,16 @@ Get-Printer
         }
 
         while ($started -lt $total -or ($jobs | Where-Object State -In 'Running', 'NotStarted')) {
-            # Fill up to throttle
             while ($started -lt $total -and ($jobs | Where-Object State -In 'Running', 'NotStarted').Count -lt $ThrottleLimit) {
                 $item = $work[$started]
                 if ($item.Type -eq 'Enumerate') {
-                    $jobs += Start-ThreadJob -ScriptBlock $jobScriptEnumerateServer -ArgumentList $item.Server, $ServerTimeoutSec -Name "Enum:$($item.Server)" -StreamingHost $Host
+                    $jobs += Start-ThreadJob -ScriptBlock $jobScriptEnumerateServer -ArgumentList $item.Server, $ServerTimeoutSec, $NoPort.IsPresent -Name "Enum:$($item.Server)" -StreamingHost $Host
                 } else {
-                    $jobs += Start-ThreadJob -ScriptBlock $jobScriptPrinterOnServer -ArgumentList $item.Server, $item.Printer, $ServerTimeoutSec -Name "Get:$($item.Server):$($item.Printer)" -StreamingHost $Host
+                    $jobs += Start-ThreadJob -ScriptBlock $jobScriptPrinterOnServer -ArgumentList $item.Server, $item.Printer, $ServerTimeoutSec, $NoPort.IsPresent -Name "Get:$($item.Server):$($item.Printer)" -StreamingHost $Host
                 }
                 $started++
             }
 
-            # Receive any completed results so far
             $ready = $jobs | Where-Object State -EQ 'Completed'
             if ($ready) {
                 $ready | Receive-Job -Keep | Write-Output
@@ -234,14 +239,12 @@ Get-Printer
                     $status = "$completed of $total finished"
                     Write-Progress -Id 1 -Activity 'Querying print servers' -Status $status -PercentComplete $pct -CurrentOperation ($ready[-1].Name)
                 }
-                # Clean up completed jobs so we don't count them twice
                 $jobs = $jobs | Where-Object State -NE 'Completed'
             }
 
             Start-Sleep -Milliseconds 150
         }
 
-        # Final receive/cleanup
         if ($jobs) {
             $more = $jobs | Receive-Job -Wait -AutoRemoveJob
             if ($more) { $more | Write-Output }
@@ -252,7 +255,6 @@ Get-Printer
         }
     }
 }
-
 
 function Get-PrintersWithErrors {
     [CmdletBinding()]
