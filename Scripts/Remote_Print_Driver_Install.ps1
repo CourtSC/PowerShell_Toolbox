@@ -9,6 +9,10 @@ function Install-RemotePrintDriver {
     driver’s directory to each remote machine (C:\Temp\HPUPD) and uses pnputil to add that INF, then registers the
     driver via Add-PrinterDriver.
 
+    In addition, to support larger remoting payloads, it ensures **WSMan MaxEnvelopeSizekb = 4096** on the **local**
+    computer (before any remoting starts) and on **each remote** computer as soon as a session is established. If the
+    current value is already >= 4096 it is left unchanged.
+
     You can target computers via -ComputerName (with optional -Credential) or pass existing -Session objects.
     Only sessions created by this function are removed on completion.
 
@@ -44,7 +48,9 @@ function Install-RemotePrintDriver {
     - Approved driver only: Name = "HP Universal Printing PCL 6 (v7.0.0)", INF = "hpcu250u.inf".
     - Requires the driver to be installed/staged on the local machine first.
     - Requires admin rights on target machines; uses pnputil and Add-PrinterDriver remotely.
+    - Ensures WSMan MaxEnvelopeSizekb >= 4096 locally and on each remote. Administrative rights are required.
     - PowerShell 7+ recommended.
+
     .LINK
     about_Remote
     about_CommonParameters
@@ -73,6 +79,30 @@ function Install-RemotePrintDriver {
         $DriverName = 'HP Universal Printing PCL 6 (v7.0.0)'
         $ExpectedInfFile = 'hpcu250u.inf'
         $RemoteRoot = 'C:\Temp\HPUPD'
+        $DesiredEnvelopeKB = 4096
+
+        # Helper scriptblock to ensure WSMan MaxEnvelopeSizekb on remote
+        $ensureEnvelopeScript = {
+            param([int]$DesiredKB)
+            $ErrorActionPreference = 'Stop'
+            try {
+                $item = Get-Item -Path WSMan:\localhost\MaxEnvelopeSizekb
+                $current = [int]$item.Value
+            } catch {
+                throw "Unable to read WSMan MaxEnvelopeSizekb: $($_.Exception.Message)"
+            }
+
+            if ($current -lt $DesiredKB) {
+                Set-Item -Path WSMan:\localhost\MaxEnvelopeSizekb -Value $DesiredKB -Force | Out-Null
+            }
+
+            # Return the effective setting for visibility
+            [pscustomobject]@{
+                ComputerName      = $env:COMPUTERNAME
+                MaxEnvelopeSizekb = (Get-Item WSMan:\localhost\MaxEnvelopeSizekb).Value
+                Changed           = ($current -lt $DesiredKB)
+            }
+        }
 
         # Validate the driver exists locally and locate its root folder
         try {
@@ -92,7 +122,24 @@ function Install-RemotePrintDriver {
             return
         }
 
-        # Build the remote scriptblock - installs ONLY the expected INF for the hard-locked driver
+        # Ensure LOCAL WSMan MaxEnvelopeSizekb >= 4096 BEFORE remoting
+        try {
+            $localItem = Get-Item -Path WSMan:\localhost\MaxEnvelopeSizekb -ErrorAction Stop
+            $localCurrent = [int]$localItem.Value
+            if ($localCurrent -lt $DesiredEnvelopeKB) {
+                if ($PSCmdlet.ShouldProcess('localhost', "Set WSMan MaxEnvelopeSizekb to $DesiredEnvelopeKB")) {
+                    Set-Item -Path WSMan:\localhost\MaxEnvelopeSizekb -Value $DesiredEnvelopeKB -Force
+                    Write-Verbose "WSMan MaxEnvelopeSizekb on localhost changed from $localCurrent to $DesiredEnvelopeKB."
+                }
+            } else {
+                Write-Verbose "WSMan MaxEnvelopeSizekb on localhost already $localCurrent (>= $DesiredEnvelopeKB)."
+            }
+        } catch {
+            Write-Error "Failed to ensure local WSMan MaxEnvelopeSizekb: $($_.Exception.Message)"
+            return
+        }
+
+        # Build the remote install script (installs ONLY the expected INF for the hard-locked driver)
         $installScript = {
             param(
                 [string]$DriverName,
@@ -143,11 +190,10 @@ function Install-RemotePrintDriver {
     }
 
     process {
-        # Normalize Session set
+        # Normalize Session set or create new sessions
         if ($PSCmdlet.ParameterSetName -eq 'Session') {
             foreach ($s in $Session) { $targets.Add($s) }
         } else {
-            # Create sessions for each ComputerName
             foreach ($cn in $ComputerName) {
                 if ($PSCmdlet.ShouldProcess($cn, 'Create PSSession')) {
                     try {
@@ -164,9 +210,24 @@ function Install-RemotePrintDriver {
 
         if ($targets.Count -eq 0) { return }
 
-        # Ensure remote folder exists, then copy files
+        # Ensure REMOTE WSMan MaxEnvelopeSizekb >= 4096 on each target BEFORE copy/installation
         foreach ($s in $targets) {
             $cn = $s.ComputerName
+            if ($PSCmdlet.ShouldProcess($cn, "Ensure WSMan MaxEnvelopeSizekb >= $DesiredEnvelopeKB")) {
+                try {
+                    $result = Invoke-Command -Session $s -ErrorAction Stop -ScriptBlock $ensureEnvelopeScript -ArgumentList $DesiredEnvelopeKB
+                    Write-Verbose ('WSMan MaxEnvelopeSizekb on {0}: {1} (Changed={2})' -f $result.ComputerName, $result.MaxEnvelopeSizekb, $result.Changed)
+                } catch {
+                    Write-Error "Failed to ensure WSMan MaxEnvelopeSizekb on '$cn': $($_.Exception.Message)"
+                    continue
+                }
+            }
+        }
+
+        # Ensure remote folder exists, then copy files and install
+        foreach ($s in $targets) {
+            $cn = $s.ComputerName
+
             if ($PSCmdlet.ShouldProcess($cn, "Prepare folder '$RemoteRoot'")) {
                 try {
                     Invoke-Command -Session $s -ErrorAction Stop -ScriptBlock {
@@ -182,15 +243,17 @@ function Install-RemotePrintDriver {
             if ($PSCmdlet.ShouldProcess($cn, "Copy driver files to '$RemoteRoot'")) {
                 try {
                     $source = Join-Path $localRoot '*'
-                    Copy-Item -Path $source -Destination $RemoteRoot -ToSession $s -Recurse -Force | Out-Null                    # Confirm expected INF exists remotely after copy (quick sanity check)
-                    $expectedRemoteInf = Join-Path -Path $RemoteRoot -ChildPath "hpcu250u.inf_amd64_82bdf715913ee606\$ExpectedInfFile"
+                    Copy-Item -Path $source -Destination $RemoteRoot -ToSession $s -Recurse -Force | Out-Null
+
+                    # Quick sanity check: confirm expected INF shows up somewhere under the root
                     $present = Invoke-Command -Session $s -ErrorAction Stop -ScriptBlock {
-                        param($root, $file) 
-                        $path = (Get-ChildItem -Path $root -Recurse -Filter $file).PSPath
-                        Test-Path -Path $path
+                        param($root, $file)
+                        $found = Get-ChildItem -Path $root -Recurse -Filter $file -ErrorAction SilentlyContinue
+                        [bool]$found
                     } -ArgumentList $RemoteRoot, $ExpectedInfFile
+
                     if (-not $present) {
-                        throw "Post-copy validation failed: '$ExpectedInfFile' not present at '$expectedRemoteInf'."
+                        throw "Post-copy validation failed: '$ExpectedInfFile' not found anywhere under '$RemoteRoot'."
                     }
                 } catch {
                     Write-Error "File copy failed to '$cn': $($_.Exception.Message)"
@@ -214,7 +277,8 @@ function Install-RemotePrintDriver {
         # Clean up only sessions we created
         foreach ($s in $ownedSessions) {
             if ($PSCmdlet.ShouldProcess($s.ComputerName, 'Remove owned session')) {
-                try { Remove-PSSession -Session $s -ErrorAction Stop } catch { Write-Verbose "Session cleanup warning: $($_.Exception.Message)" }
+                try { Remove-PSSession -Session $s -ErrorAction Stop }
+                catch { Write-Verbose "Session cleanup warning: $($_.Exception.Message)" }
             }
         }
     }
