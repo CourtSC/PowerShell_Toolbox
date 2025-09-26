@@ -89,6 +89,11 @@ Get-Printer
 
         Import-Module PrintManagement -ErrorAction Stop
         Import-Module ActiveDirectory -ErrorAction Stop
+        
+        if ($PSBoundParameters['Verbose'] -or $RebuildPortCache -or (-not $script:PortCache)) {
+            Write-Host 'Building printer port cache... please be patient.' -ForegroundColor Yellow
+        }
+        Write-Host 'Tip: Use -RebuildPortCache if you suspect ports have changed on a server.' -ForegroundColor DarkGray
 
         # Ensure global (script:) port cache exists; (re)build if requested and we're not skipping ports
         if (-not $NoPort) {
@@ -98,9 +103,6 @@ Get-Printer
             if ($RebuildPortCache) {
                 $script:PortCache = @{}
             }
-            
-            Write-Host 'Building port cache. Please be patient, this may take some time.' -ForegroundColor Yellow
-            Write-Host 'Tip: if you suspect that the port and/or IP a print queue has been assigned has changed, you can rebuild the cache by including -RebuildPortCache when calling Get-MHDPrinters.' -ForegroundColor Yellow
 
             foreach ($srv in $Servers) {
                 if (-not $script:PortCache.ContainsKey($srv)) {
