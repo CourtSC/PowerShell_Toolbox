@@ -7,10 +7,12 @@ Gets printer information from a set of MHD print servers.
 Queries one or more print servers for one or more specified printer names.
 By default, queries the MHD print servers (ADCVPRNMHDMS001–006, 020–024, 030–031, 040–041, 050–052, 060–062, 070–071, 080–081).
 
-Runs work in parallel using thread jobs (fast and progress-safe). Progress is reported from the parent runspace if `-Verbose` is set.  
-Returns structured objects with server, printer, driver, port, and AD group info.  
+Runs work in parallel using thread jobs (fast and progress-safe). Progress is reported from the parent runspace if `-Verbose` is set.
+Returns structured objects with server, printer, driver, port, and AD group info.
 
-If `-NoPort` is specified, the function skips network port lookups (faster, but omits `HostAddress`, `PortDescription`, and `SNMPEnabled`).
+Port data is served from a session-wide cache (`script:PortCache`) to avoid repeated remote calls.
+The cache is built on-demand (first run) or when `-RebuildPortCache` is specified. Jobs **never** call `Get-PrinterPort` directly.
+If a specific port is missing from the cache, those port fields will be `$null` until you rebuild the cache.
 
 .PARAMETER Printers
 One or more printer names to look up. Accepts pipeline input.
@@ -25,19 +27,27 @@ Maximum number of parallel jobs. Default: 12.
 Suppress the Write-Progress UI. Note: progress is shown only when -Verbose is used; -NoProgress suppresses it even then.
 
 .PARAMETER NoPort
-Skips printer port lookups for speed. `HostAddress`, `PortDescription`, and `SNMPEnabled` will be null.
+Skips using or building the port cache and omits port info (HostAddress, PortDescription, SNMPEnabled = $null).
+
+.PARAMETER RebuildPortCache
+Rebuilds the session-wide port cache before querying (forces fresh `Get-PrinterPort` calls in the parent runspace).
 
 .PARAMETER ServerTimeoutSec
 Timeout (in seconds) for each server/printer job. Default: 60.
 
 .EXAMPLE
-PS> Get-MHDPrinters -Printers 'HP123','CanonX' -NoPort
+PS> Get-MHDPrinters -Printers 'HP123','CanonX' -RebuildPortCache
 
 .EXAMPLE
-PS> 'HP123' | Get-MHDPrinters -ThrottleLimit 24 -Verbose
+PS> Get-MHDPrinters -NoPort -ThrottleLimit 24
+
+.EXAMPLE
+PS> 'HP123' | Get-MHDPrinters -Verbose
 
 .NOTES
-Requires the PrintManagement and ActiveDirectory modules.
+- Port cache variable: script:PortCache  (Hashtable: Server -> (Hashtable: PortName -> PrinterPort object))
+- Cache lifetime: current PowerShell session.
+- Requires the PrintManagement and ActiveDirectory modules.
 .LINK
 Get-Printer
 #>
@@ -67,6 +77,8 @@ Get-Printer
 
         [switch]$NoPort,
 
+        [switch]$RebuildPortCache,
+
         [ValidateRange(5, 600)]
         [int]$ServerTimeoutSec = 60
     )
@@ -75,37 +87,57 @@ Get-Printer
         # Show progress only when -Verbose is supplied; allow -NoProgress to suppress even then
         $ShowProgress = ($PSBoundParameters['Verbose']) -and (-not $NoProgress)
 
-        # Load modules in parent runspace (also import inside jobs)
         Import-Module PrintManagement -ErrorAction Stop
         Import-Module ActiveDirectory -ErrorAction Stop
 
+        # Ensure global (script:) port cache exists; (re)build if requested and we're not skipping ports
+        if (-not $NoPort) {
+            if (-not (Get-Variable -Name PortCache -Scope Script -ErrorAction SilentlyContinue)) {
+                Set-Variable -Name PortCache -Scope Script -Value (@{}) -Option None
+            }
+            if ($RebuildPortCache) {
+                $script:PortCache = @{}
+            }
+            
+            Write-Host 'Building port cache. Please be patient, this may take some time.' -ForegroundColor Yellow
+            Write-Host 'Tip: if you suspect that the port and/or IP a print queue has been assigned has changed, you can rebuild the cache by including -RebuildPortCache when calling Get-MHDPrinters.' -ForegroundColor Yellow
+
+            foreach ($srv in $Servers) {
+                if (-not $script:PortCache.ContainsKey($srv)) {
+                    # Build per-server cache ONCE, here in parent runspace
+                    try {
+                        $serverPorts = @{}
+                        foreach ($prt in (Get-PrinterPort -ComputerName $srv -ErrorAction Stop)) {
+                            $serverPorts[$prt.Name] = $prt
+                        }
+                        $script:PortCache[$srv] = $serverPorts
+                        Write-Verbose "Cached $($serverPorts.Count) ports for $srv."
+                    } catch {
+                        # If we can't cache this server now, store an empty map to avoid trying in jobs
+                        $script:PortCache[$srv] = @{}
+                        Write-Verbose "Failed to cache ports for $($srv): $($_.Exception.Message)"
+                    }
+                }
+            }
+        }
+
+        # Create a snapshot for jobs (jobs can't see parent scopes; we pass what they need)
+        $PortCacheSnapshot = if ($NoPort) { @{} } else { $script:PortCache }
+
         $jobScriptEnumerateServer = {
-            param($Server, $TimeoutSec, $SkipPort)
+            param($Server, $TimeoutSec, $SkipPort, $PortMapForServer)
 
             # Import-Module PrintManagement -ErrorAction Stop
             # Import-Module ActiveDirectory -ErrorAction Stop
 
             try {
                 $printers = Get-Printer -ComputerName $Server -ErrorAction Stop
-
-                $ports = @{}
-                if (-not $SkipPort) {
-                    try {
-                        foreach ($prt in (Get-PrinterPort -ComputerName $Server -ErrorAction Stop)) {
-                            $ports[$prt.Name] = $prt
-                        }
-                    } catch { }
-                }
-
                 foreach ($p in $printers) {
+                    # Port lookup strictly from cache snapshot; jobs NEVER call Get-PrinterPort
                     $port = $null
-                    if (-not $SkipPort) {
-                        if ($ports.ContainsKey($p.PortName)) {
-                            $port = $ports[$p.PortName]
-                        } else {
-                            try {
-                                $port = Get-PrinterPort -ComputerName $Server -Name $p.PortName -ErrorAction Stop
-                            } catch { }
+                    if (-not $SkipPort -and $PortMapForServer) {
+                        if ($PortMapForServer.ContainsKey($p.PortName)) {
+                            $port = $PortMapForServer[$p.PortName]
                         }
                     }
 
@@ -143,7 +175,7 @@ Get-Printer
         }
 
         $jobScriptPrinterOnServer = {
-            param($Server, $Printer, $TimeoutSec, $SkipPort)
+            param($Server, $Printer, $TimeoutSec, $SkipPort, $PortMapForServer)
 
             # Import-Module PrintManagement -ErrorAction Stop
             # Import-Module ActiveDirectory -ErrorAction Stop
@@ -155,11 +187,12 @@ Get-Printer
                 return
             }
 
+            # Port lookup strictly from cache snapshot; jobs NEVER call Get-PrinterPort
             $port = $null
-            if (-not $SkipPort) {
-                try {
-                    $port = Get-PrinterPort -ComputerName $Server -Name $p.PortName -ErrorAction Stop
-                } catch { }
+            if (-not $SkipPort -and $PortMapForServer) {
+                if ($PortMapForServer.ContainsKey($p.PortName)) {
+                    $port = $PortMapForServer[$p.PortName]
+                }
             }
 
             $filterString = "*-PRN-$($p.Name)*"
@@ -222,10 +255,20 @@ Get-Printer
         while ($started -lt $total -or ($jobs | Where-Object State -In 'Running', 'NotStarted')) {
             while ($started -lt $total -and ($jobs | Where-Object State -In 'Running', 'NotStarted').Count -lt $ThrottleLimit) {
                 $item = $work[$started]
+                $serverPortMap = if ($NoPort) { $null } else { $PortCacheSnapshot[$($item.Server)] }
+
                 if ($item.Type -eq 'Enumerate') {
-                    $jobs += Start-ThreadJob -ScriptBlock $jobScriptEnumerateServer -ArgumentList $item.Server, $ServerTimeoutSec, $NoPort.IsPresent -Name "Enum:$($item.Server)" -StreamingHost $Host
+                    $jobs += Start-ThreadJob `
+                        -ScriptBlock $jobScriptEnumerateServer `
+                        -ArgumentList $item.Server, $ServerTimeoutSec, $NoPort.IsPresent, $serverPortMap `
+                        -Name "Enum:$($item.Server)" `
+                        -StreamingHost $Host
                 } else {
-                    $jobs += Start-ThreadJob -ScriptBlock $jobScriptPrinterOnServer -ArgumentList $item.Server, $item.Printer, $ServerTimeoutSec, $NoPort.IsPresent -Name "Get:$($item.Server):$($item.Printer)" -StreamingHost $Host
+                    $jobs += Start-ThreadJob `
+                        -ScriptBlock $jobScriptPrinterOnServer `
+                        -ArgumentList $item.Server, $item.Printer, $ServerTimeoutSec, $NoPort.IsPresent, $serverPortMap `
+                        -Name "Get:$($item.Server):$($item.Printer)" `
+                        -StreamingHost $Host
                 }
                 $started++
             }
@@ -255,6 +298,7 @@ Get-Printer
         }
     }
 }
+
 
 function Get-PrintersWithErrors {
     [CmdletBinding()]
