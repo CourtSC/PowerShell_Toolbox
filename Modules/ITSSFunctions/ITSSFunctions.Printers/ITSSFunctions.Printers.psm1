@@ -1340,7 +1340,7 @@ function Get-ADPrinterGroups {
         }
         if (-not $output) {
             $filterString = "*-PRN-$name*"
-            $output = Get-ADGroup -Filter { Name -like $filterString }
+            $output = Get-ADGroup -Filter { Name -like $filterString } -Properties $effectiveProps @opt
         } 
         return $output
     }
