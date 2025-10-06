@@ -263,7 +263,9 @@ function Update-PrintDriver {
     process {
         if ($CSVPath) {
             Write-Verbose "Importing printers from $CSVPath..."
-            $PrinterNames = Import-Csv -Path $CSVPath
+            $data = Import-Csv -Path $CSVPath
+            $nameProperty = ($data | Get-Member -MemberType NoteProperty)[0].Name
+            $PrinterNames = $data.$nameProperty
         }
 
         $printers = @()
