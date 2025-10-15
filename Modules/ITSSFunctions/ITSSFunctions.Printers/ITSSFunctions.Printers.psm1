@@ -187,6 +187,9 @@ function Get-MHDPrinters {
                 Write-Warning ("[Port] Failed to get port '{0}' on '{1}'. {2}" -f $p.PortName, $p.ComputerName, $_.Exception.Message)
             }
 
+            $config = $null
+            $config = Get-PrintConfiguration -ComputerName $p.ComputerName -PrinterName $p.Name
+
             # Emit final enriched object
             [pscustomobject]@{
                 Server          = $p.ComputerName
@@ -195,6 +198,7 @@ function Get-MHDPrinters {
                 StandardGroup   = $stdGroup
                 DefaultGroup    = $defGroup
                 DriverName      = $p.DriverName
+                Color           = $config.Color
                 PortName        = $p.PortName
                 HostAddress     = $port.PrinterHostAddress
                 PortDescription = $port.Description
