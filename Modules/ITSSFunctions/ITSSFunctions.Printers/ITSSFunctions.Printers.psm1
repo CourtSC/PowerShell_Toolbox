@@ -325,7 +325,7 @@ function Get-PrintersWithErrors {
 
     $printers = foreach ($server in $Servers) {
         try {
-            Get-Printer -ComputerName $server -ErrorAction Stop | Where-Object { $_.PrinterStatus -eq 'Error' }
+            Get-Printer -ComputerName $server -ErrorAction Stop | Where-Object { ($_.PrinterStatus -eq 'Error') -or (($_.PrinterStatus -eq 'Offline')) }
         } catch {
             Write-Warning "Failed to get printers from $($server): $_"
         }

@@ -30,12 +30,14 @@ foreach ($srv in $mhdPrintServers) {
             try { $groups += Get-ADGroup -Identity $groupString -Properties info } catch {}
         }
         foreach ($g in $groups) {
-            if ($g.Name -like '*-DEF') { 
-                $defGroup = $g.Name
-                $defInfo = $g.info
-            } elseif ($g.Name -like '*-PRN-*') {
-                $stdGroup = $g.Name
-                $stdInfo = $g.info
+            if ($g.info.Substring(2, 15) -eq $p.ComputerName) {
+                if ($g.Name -like '*-DEF') { 
+                    $defGroup = $g.Name
+                    $defInfo = $g.info
+                } elseif ($g.Name -like '*-PRN-*') {
+                    $stdGroup = $g.Name
+                    $stdInfo = $g.info
+                }
             }
         }
         if ($hostAddress) {
@@ -53,8 +55,12 @@ foreach ($srv in $mhdPrintServers) {
                 StandardGroup = $stdGroup
                 StandardNotes = $stdInfo
                 DefaultGroup  = $defGroup
-                DefaultInfo   = $defInfo
+                DefaultNotes  = $defInfo
             }
         }
     }
 }
+
+$outputJSON = $output | ConvertTo-Json
+
+return $outputJSON
