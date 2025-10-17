@@ -6,4 +6,3 @@ Modules/*
 !Modules/Microsoft.PowerShell.SecretStore/**
 !Modules/Microsoft.PowerShell.SecretStore/
 Help/
-/Microsoft.PowerShell_profile.ps1
