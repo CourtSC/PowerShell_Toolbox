@@ -14,7 +14,6 @@ This command instructs winget to install the package with the ID `Microsoft.Pow
 
 After the installation completes, you can launch PowerShell 7 from the Start Menu or by typing `pwsh` in a command prompt. Note that PowerShell 7 installs alongside Windows PowerShell (version 5.1) and does not replace it.
 
-> [!IMPORTANT|dim-hover] PowerShell ISE
 > For those of you who are familiar with the built-in Windows PowerShell ISE, you should be aware that *PowerShell 7 is not supported in ISE.*
 
 ### Recommended
@@ -122,4 +121,3 @@ ms-vscode.powershell
 8. Change to a Monospaced font for readability.
 	- [JetBrains Mono: A free and open source typeface for developers | JetBrains: Developer Tools for Professionals and Teams](https://www.jetbrains.com/lp/mono/)
 
-    
