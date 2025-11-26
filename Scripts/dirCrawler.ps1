@@ -10,7 +10,7 @@ function Get-DirTreeSize {
     )
 
     begin {
-        $ErrorActionPreference = 'Stop'
+        $ErrorActionPreference = 'SilentlyContinue'
 
         # Start runtime stopwatch
         $script:Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -98,7 +98,7 @@ function Get-DirTreeSize {
             # Respect -WhatIf / -Confirm
             if ($PSCmdlet.ShouldProcess("Excel ($($procs.Count))", 'Stop-Process -Force')) {
                 try {
-                    $procs | Stop-Process -Force -ErrorAction Stop
+                    $procs | Stop-Process -Force -ErrorAction SilentlyContinue
                     Write-Verbose 'Successfully closed Excel.'
                     return $true
                 } catch {
@@ -112,12 +112,12 @@ function Get-DirTreeSize {
     process {
         if (-not $Recurse) {
             # Single directory stats only
-            $files = Get-ChildItem -Path $Path -File -ErrorAction Stop
+            $files = Get-ChildItem -LiteralPath $Path -File -ErrorAction SilentlyContinue
 
             $fileStats = $files | Measure-Object -Property Length -Sum
             $fileCount = $fileStats.Count
 
-            $directoryCount = (Get-ChildItem -Path $Path -Directory -ErrorAction Stop | Measure-Object).Count
+            $directoryCount = (Get-ChildItem -LiteralPath $Path -Directory -ErrorAction SilentlyContinue | Measure-Object).Count
 
             $sizeMB = if ($fileStats.Sum) { [math]::Round($fileStats.Sum / 1MB, 3) } else { 0 }
 
@@ -150,11 +150,11 @@ function Get-DirTreeSize {
         # ---- Recursive version below ----
 
         # Grab ALL directories once
-        $dirs = Get-ChildItem -Path $Path -Directory -Recurse -ErrorAction Stop
+        $dirs = Get-ChildItem -LiteralPath $Path -Directory -Recurse -ErrorAction SilentlyContinue
         $allDirs = @($Path) + ($dirs | Select-Object -ExpandProperty FullName)
 
         # Grab ALL files once
-        $allFiles = Get-ChildItem -Path $Path -File -Recurse -ErrorAction Stop
+        $allFiles = Get-ChildItem -LiteralPath $Path -File -Recurse -ErrorAction SilentlyContinue
 
         # Group files by directory to avoid repeated Get-ChildItem calls
         $filesByDir = $allFiles | Group-Object -Property DirectoryName -AsHashTable -AsString
