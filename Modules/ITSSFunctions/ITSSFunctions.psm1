@@ -529,7 +529,7 @@ function Get-EODTime {
 function Get-ADGroupMemberships {
     <#
     .SYNOPSIS
-    Retrieves the Active Directory groups that a specified user or computer is a member of.
+    Retrieves the Active directory groups that a specified user or computer is a member of.
 
     .DESCRIPTION
     The Get-ADGroupMemberships function queries Active Directory to return the group memberships for a given user or computer identity. 
@@ -1192,6 +1192,13 @@ function Get-DirTreeSize {
     )
 
     begin {
+
+        if (-not (Get-Module -ListAvailable -Name 'ImportExcel')) {
+            Write-Host 'ImportExcel module not found. Installing...'
+            Install-Module -Name ImportExcel -Scope CurrentUser -Force
+            Write-Host 'ImportExcel module installed.'
+        } else { Import-Module ImportExcel }
+
         $ErrorActionPreference = 'SilentlyContinue'
 
         # Start runtime stopwatch

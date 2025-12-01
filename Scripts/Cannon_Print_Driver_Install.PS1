@@ -73,6 +73,30 @@ function Install-RemotePrintDriver {
         $DriverName = 'Canon iR-ADV 8285/8295 UFR II'
         $ExpectedInfFile = 'cnlb0ua64.inf'
         $RemoteRoot = 'C:\Temp\Canon'
+        $DesiredEnvelopeKB = 4096
+
+        # Helper scriptblock to ensure WSMan MaxEnvelopeSizekb on remote
+        $ensureEnvelopeScript = {
+            param([int]$DesiredKB)
+            $ErrorActionPreference = 'Stop'
+            try {
+                $item = Get-Item -Path WSMan:\localhost\MaxEnvelopeSizekb
+                $current = [int]$item.Value
+            } catch {
+                throw "Unable to read WSMan MaxEnvelopeSizekb: $($_.Exception.Message)"
+            }
+
+            if ($current -lt $DesiredKB) {
+                Set-Item -Path WSMan:\localhost\MaxEnvelopeSizekb -Value $DesiredKB -Force | Out-Null
+            }
+
+            # Return the effective setting for visibility
+            [pscustomobject]@{
+                ComputerName      = $env:COMPUTERNAME
+                MaxEnvelopeSizekb = (Get-Item WSMan:\localhost\MaxEnvelopeSizekb).Value
+                Changed           = ($current -lt $DesiredKB)
+            }
+        }
 
         # Validate the driver exists locally and locate its root folder
         try {
@@ -163,6 +187,21 @@ function Install-RemotePrintDriver {
         }
 
         if ($targets.Count -eq 0) { return }
+
+        # Ensure REMOTE WSMan MaxEnvelopeSizekb >= 4096 on each target BEFORE copy/installation
+        foreach ($s in $targets) {
+            $cn = $s.ComputerName
+            if ($PSCmdlet.ShouldProcess($cn, "Ensure WSMan MaxEnvelopeSizekb >= $DesiredEnvelopeKB")) {
+                try {
+                    $result = Invoke-Command -Session $s -ErrorAction Stop -ScriptBlock $ensureEnvelopeScript -ArgumentList $DesiredEnvelopeKB
+                    Write-Verbose ('WSMan MaxEnvelopeSizekb on {0}: {1} (Changed={2})' -f $result.ComputerName, $result.MaxEnvelopeSizekb, $result.Changed)
+                } catch {
+                    Write-Error "Failed to ensure WSMan MaxEnvelopeSizekb on '$cn': $($_.Exception.Message)"
+                    continue
+                }
+            }
+        }
+
 
         # Ensure remote folder exists, then copy files
         foreach ($s in $targets) {
