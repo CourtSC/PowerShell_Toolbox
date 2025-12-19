@@ -1197,18 +1197,22 @@ function Get-DirTreeSize {
             Write-Host 'ImportExcel module not found. Installing...'
             Install-Module -Name ImportExcel -Scope CurrentUser -Force
             Write-Host 'ImportExcel module installed.'
-        } else { Import-Module ImportExcel }
+        } else { 
+            if ( -not (Get-Module -Name ImportExcel)) {
+                Import-Module ImportExcel 
+            }
+        }
 
-        $ErrorActionPreference = 'SilentlyContinue'
+        $ErrorActionPreference = 'Stop'
 
         # Start runtime stopwatch
         $script:Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-        # Normalize path once
-        $Path = (Resolve-Path -LiteralPath $Path).ProviderPath
-        if (-not $Path.EndsWith('\')) { $Path += '\' }
+        # Normalize $Path once – no trailing backslash
+        $Path = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\')
 
-        $script:output = New-Object System.Collections.Generic.List[object]
+
+        $output = New-Object System.Collections.Generic.List[object]
 
         function Stop-ExcelProcess {
             <#
@@ -1301,12 +1305,12 @@ function Get-DirTreeSize {
     process {
         if (-not $Recurse) {
             # Single directory stats only
-            $files = Get-ChildItem -LiteralPath $Path -File -ErrorAction SilentlyContinue
+            $files = Get-ChildItem -LiteralPath $Path -File -ErrorAction Stop
 
             $fileStats = $files | Measure-Object -Property Length -Sum
             $fileCount = $fileStats.Count
 
-            $directoryCount = (Get-ChildItem -LiteralPath $Path -Directory -ErrorAction SilentlyContinue | Measure-Object).Count
+            $directoryCount = (Get-ChildItem -LiteralPath $Path -Directory -ErrorAction Stop | Measure-Object).Count
 
             $sizeMB = if ($fileStats.Sum) { [math]::Round($fileStats.Sum / 1MB, 3) } else { 0 }
 
@@ -1321,7 +1325,7 @@ function Get-DirTreeSize {
                 $lastAccessDate = $lastAccess.ToString('MM/dd/yyyy HH:mm')
             }
 
-            $script:output.Add([pscustomobject]@{
+            $output.Add([pscustomobject]@{
                     Path           = $Path
                     Parent         = $null
                     Depth          = $depth
@@ -1339,31 +1343,51 @@ function Get-DirTreeSize {
         # ---- Recursive version below ----
 
         # Grab ALL directories once
-        $dirs = Get-ChildItem -LiteralPath $Path -Directory -Recurse -ErrorAction SilentlyContinue
-        $allDirs = @($Path) + ($dirs | Select-Object -ExpandProperty FullName)
+        $dirs = Get-ChildItem -LiteralPath $Path -Directory -Recurse -ErrorAction Stop
+
+        # Normalize directory paths (no trailing slashes)
+        $rootPath = $Path.TrimEnd('\')
+        $allDirs = @($rootPath) + ($dirs | ForEach-Object { $_.FullName.TrimEnd('\') })
 
         # Grab ALL files once
-        $allFiles = Get-ChildItem -LiteralPath $Path -File -Recurse -ErrorAction SilentlyContinue
+        $allFiles = Get-ChildItem -LiteralPath $Path -File -Recurse -ErrorAction Stop
 
-        # Group files by directory to avoid repeated Get-ChildItem calls
-        $filesByDir = $allFiles | Group-Object -Property DirectoryName -AsHashTable -AsString
+        # Group files by normalized directory name
+        $filesByDir = $allFiles | ForEach-Object {
+            $_ | Add-Member -NotePropertyName NormalizedDirectory `
+                -NotePropertyValue ($_.DirectoryName.TrimEnd('\')) -PassThru
+        } | Group-Object -Property NormalizedDirectory -AsHashTable -AsString
+
 
         foreach ($dirPath in $allDirs) {
+
             $dirFiles = if ($filesByDir.ContainsKey($dirPath)) { $filesByDir[$dirPath] } else { @() }
 
             $fileStats = $dirFiles | Measure-Object -Property Length -Sum
             $fileCount = $fileStats.Count
             $sizeMB = if ($fileStats.Sum) { [math]::Round($fileStats.Sum / 1MB, 3) } else { 0 }
 
-            # count immediate child dirs (not all descendants)
-            $childDirCount = ($dirs | Where-Object { (Split-Path $_.FullName -Parent) -eq $dirPath } | Measure-Object).Count
+            $childDirCount = ($dirs | Where-Object {
+                    ( $_.FullName.TrimEnd('\') | Split-Path -Parent ) -eq $dirPath
+                } | Measure-Object).Count
 
             $owner = (Get-Acl -LiteralPath $dirPath).Owner
 
-            $relative = $dirPath.Replace($Path, '.\')
-            $depth = ($relative -split '\\').Count - 1
-            $parent = Split-Path -Path $dirPath -Parent
-            if ($parent -eq '') { $parent = $null }
+            if ($dirPath -eq $rootPath) {
+                $depth = 0
+                $parent = $null
+            } else {
+                $relative = $dirPath.Substring($rootPath.Length).TrimStart('\')
+                $depth = ($relative -split '\\').Count
+
+                $parent = Split-Path -Path $dirPath -Parent
+                $parent = $parent.TrimEnd('\')
+                if ($parent -eq '') { $parent = $null }
+            }
+
+            # Avoid leaking values from previous iterations
+            $lastModifiedDate = $null
+            $lastAccessDate = $null
 
             if ($dirFiles.Count -gt 0) {
                 $lastWrite = ($dirFiles | Measure-Object LastWriteTime -Maximum).Maximum
@@ -1373,7 +1397,7 @@ function Get-DirTreeSize {
                 $lastAccessDate = $lastAccess.ToString('MM/dd/yyyy HH:mm')
             }
 
-            $script:output.Add([pscustomobject]@{
+            $output.Add([pscustomobject]@{
                     Path           = $dirPath
                     Parent         = $parent
                     Depth          = $depth
@@ -1386,11 +1410,13 @@ function Get-DirTreeSize {
                 }) | Out-Null
         }
 
+
+
         # Compute TotalSizeInMB bottom-up without O(n²)
         $byPath = @{}
         $children = @{}
 
-        foreach ($item in $script:output) {
+        foreach ($item in $output) {
             $byPath[$item.Path] = $item
             if ($item.Parent) {
                 if (-not $children.ContainsKey($item.Parent)) {
@@ -1400,7 +1426,7 @@ function Get-DirTreeSize {
             }
         }
 
-        foreach ($item in $script:output | Sort-Object Depth -Descending) {
+        foreach ($item in $output | Sort-Object Depth -Descending) {
             $total = [decimal]$item.DirSizeInMB
             if ($children.ContainsKey($item.Path)) {
                 foreach ($child in $children[$item.Path]) {
@@ -1410,33 +1436,34 @@ function Get-DirTreeSize {
             $item | Add-Member -NotePropertyName TotalSizeInMB -NotePropertyValue $total -Force
         }
 
-        # Export once at the end
-        if ($script:output.Count -gt 0 -and $Recurse) {
-            Stop-ExcelProcess -Force | Out-Null
-            Start-Sleep -Seconds 3
-            $leaf = Split-Path -Path $Path -Leaf
-            $script:output | Export-Excel -Path $ExportPath -WorksheetName $leaf -TableName "$($leaf)_Data" -AutoSize -ClearSheet
-        }
     }
-
+    
     end {
         if ($script:Stopwatch) {
             $script:Stopwatch.Stop()
             $elapsed = $script:Stopwatch.Elapsed
-
+            
             # Verbose message
             Write-Verbose ('Get-DirTreeSize completed in {0:hh\:mm\:ss\.fff}' -f $elapsed)
-
+            
             # Add runtime to root row (optional)
-            $root = $script:output | Where-Object { $_.Path -eq $Path } | Select-Object -First 1
+            $root = $output | Where-Object { $_.Path -eq $Path } | Select-Object -First 1
             if ($null -ne $root) {
                 $root | Add-Member -NotePropertyName TotalRuntimeSeconds -NotePropertyValue ([math]::Round($elapsed.TotalSeconds, 3)) -Force
             }
         }
 
+        # Export once at the end
+        if ($output.Count -gt 0 -and $Recurse) {
+            Stop-ExcelProcess -Force | Out-Null
+            Start-Sleep -Seconds 3
+            $leaf = Split-Path -Path $Path -Leaf
+            $output | Export-Excel -Path $ExportPath -WorksheetName $leaf -TableName "$($leaf)_Data" -AutoSize -ClearSheet
+        }
+
         # Non-recursive calls return objects; recursive already exported, but you might still want the objects:
-        if ($script:output -and -not $Recurse) {
-            return $script:output
+        if ($output -and -not $Recurse) {
+            return $output
         }
     }
 }
