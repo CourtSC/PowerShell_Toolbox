@@ -5,7 +5,7 @@ $servers = @(
 
 $pattern = '(?i)\\\\(' + ($servers -join '|') + ')(\\|$)'
 
-function Process-UserHive([string]$Sid) {
+function Remove-PrinterRegKeys([string]$Sid) {
     $base = "Registry::HKEY_USERS\$Sid"
 
     $connectionsKey = "$base\Printers\Connections"
@@ -55,7 +55,7 @@ foreach ($p in $profiles) {
     }
 
     if (Test-Path $hkuPath) {
-        Process-UserHive -Sid $sid
+        Remove-PrinterRegKeys -Sid $sid
     }
 
     if ($loadedByUs) {
