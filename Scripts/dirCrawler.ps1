@@ -6,282 +6,172 @@ function Get-DirTreeSize {
 
         [switch]$Recurse,
 
-        [string]$ExportPath = "$env:OneDrive\Documents\DirectoryTreeSize.xlsx"
+        [string]$ExportPath = "$env:OneDrive\Documents\DirectoryTreeSize.csv",
+
+        # Optional: don’t scan deeper than this (huge perf win on monster shares)
+        [int]$MaxDepth = [int]::MaxValue,
+
+        # Optional: skip owner lookups (ACL calls are slow on shares)
+        [switch]$SkipOwner
     )
 
-    begin {
+    $ErrorActionPreference = 'Stop'
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-        if (-not (Get-Module -ListAvailable -Name 'ImportExcel')) {
-            Write-Host 'ImportExcel module not found. Installing...'
-            Install-Module -Name ImportExcel -Scope CurrentUser -Force
-            Write-Host 'ImportExcel module installed.'
-        } else { 
-            if ( -not (Get-Module -Name ImportExcel)) {
-                Import-Module ImportExcel 
-            }
+    $rootPath = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\')
+
+    if (-not $Recurse) {
+        $files = Get-ChildItem -LiteralPath $rootPath -File -ErrorAction Stop
+        $fileStats = $files | Measure-Object -Property Length -Sum
+        $directoryCount = (Get-ChildItem -LiteralPath $rootPath -Directory -ErrorAction Stop | Measure-Object).Count
+
+        $lastWrite = if ($files.Count) { ($files | Measure-Object LastWriteTime -Maximum).Maximum } else { $null }
+        $lastAccess = if ($files.Count) { ($files | Measure-Object LastAccessTime -Maximum).Maximum } else { $null }
+
+        [pscustomobject]@{
+            Path                = $rootPath
+            Parent              = $null
+            Depth               = 0
+            Owner               = if ($SkipOwner) { $null } else { (Get-Acl -LiteralPath $rootPath).Owner }
+            FileCount           = $fileStats.Count
+            DirectoryCount      = $directoryCount
+            DirSizeInMB         = if ($fileStats.Sum) { [math]::Round($fileStats.Sum / 1MB, 3) } else { 0 }
+            TotalSizeInMB       = if ($fileStats.Sum) { [math]::Round($fileStats.Sum / 1MB, 3) } else { 0 }
+            LastModified        = if ($lastWrite) { $lastWrite.ToString('MM/dd/yyyy HH:mm') } else { $null }
+            LastAccessed        = if ($lastAccess) { $lastAccess.ToString('MM/dd/yyyy HH:mm') } else { $null }
+            TotalRuntimeSeconds = $null
+        }
+        return
+    }
+
+    # --- Aggregation tables (keyed by normalized dir path) ---
+    $sizeBytesByDir = @{}
+    $fileCountByDir = @{}
+    $lastWriteByDir = @{}
+    $lastAccessByDir = @{}
+    $dirSet = New-Object 'System.Collections.Generic.HashSet[string]'
+
+    # Ensure root exists in tables
+    $dirSet.Add($rootPath) | Out-Null
+    $sizeBytesByDir[$rootPath] = 0L
+    $fileCountByDir[$rootPath] = 0
+
+    # --- Stream files once ---
+    Get-ChildItem -LiteralPath $rootPath -File -Recurse -Force -ErrorAction Stop | ForEach-Object {
+        $dir = $_.DirectoryName.TrimEnd('\')
+
+        # Depth filter (optional)
+        if ($MaxDepth -ne [int]::MaxValue) {
+            $rel = $dir.Substring($rootPath.Length).TrimStart('\')
+            $depth = if ($rel) { ($rel -split '\\').Count } else { 0 }
+            if ($depth -gt $MaxDepth) { return }
         }
 
-        $ErrorActionPreference = 'Stop'
+        $dirSet.Add($dir) | Out-Null
 
-        # Start runtime stopwatch
-        $script:Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        if (-not $sizeBytesByDir.ContainsKey($dir)) {
+            $sizeBytesByDir[$dir] = 0L
+            $fileCountByDir[$dir] = 0
+        }
 
-        # Normalize $Path once – no trailing backslash
-        $Path = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\')
+        $sizeBytesByDir[$dir] += [int64]$_.Length
+        $fileCountByDir[$dir] += 1
 
+        $lw = $_.LastWriteTime
+        if (-not $lastWriteByDir.ContainsKey($dir) -or $lw -gt $lastWriteByDir[$dir]) {
+            $lastWriteByDir[$dir] = $lw
+        }
 
-        $output = New-Object System.Collections.Generic.List[object]
-
-        function Stop-ExcelProcess {
-            <#
-                .SYNOPSIS
-                Stops any running Microsoft Excel processes, with optional confirmation and WhatIf support.
-
-                .DESCRIPTION
-                Stop-ExcelProcess detects running instances of Microsoft Excel and stops them. By default, if Excel is running,
-                the function prompts for confirmation using ShouldContinue. You can bypass the prompt with -Force, or rely on
-                PowerShell’s standard -WhatIf / -Confirm behavior via SupportsShouldProcess.
-
-                The function returns a Boolean indicating the outcome:
-                - $true  : Excel was not running or was successfully stopped.
-                - $false : The user cancelled or an error occurred while stopping Excel.
-
-                .PARAMETER Force
-                Skips the interactive confirmation prompt and attempts to stop Excel immediately. Still respects -WhatIf/-Confirm.
-
-                .INPUTS
-                None. You cannot pipe input to this function.
-
-                .OUTPUTS
-                System.Boolean
-                Returns $true on success (or when Excel is already closed), $false on cancellation or error.
-
-                .EXAMPLE
-                PS> Stop-ExcelProcess
-                Prompts to close running Excel processes, then stops them if confirmed.
-
-                .EXAMPLE
-                PS> Stop-ExcelProcess -Force
-                Immediately stops any running Excel processes without prompting.
-
-                .EXAMPLE
-                PS> Stop-ExcelProcess -WhatIf
-                Shows what would happen if the function ran, without making changes.
-
-                .NOTES
-                Requires Windows when targeting Microsoft Excel as a desktop application.
-                Uses Get-Process 'EXCEL' and Stop-Process -Force.
-                Integrates with -WhatIf and -Confirm via SupportsShouldProcess.
-
-                .LINK
-                about_Comment_Based_Help
-                .LINK
-                about_CommonParameters
-            #>
-
-            [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
-            [OutputType([bool])]
-            param(
-                [Parameter()]
-                [switch]$Force
-            )
-
-            # Detect Excel processes safely
-            $procs = Get-Process -Name 'EXCEL' -ErrorAction SilentlyContinue
-
-            if (-not $procs) {
-                Write-Verbose 'No Excel processes found.'
-                return $true
-            }
-
-            Write-Verbose ('Detected {0} Excel process(es): {1}' -f $procs.Count, ($procs.Id -join ', '))
-
-            # Optional friendly prompt unless -Force
-            if (-not $Force) {
-                $caption = 'Excel must be closed before continuing.'
-                $message = "Found $($procs.Count) Excel process(es). Close them now?"
-                if (-not $PSCmdlet.ShouldContinue($message, $caption)) {
-                    Write-Verbose 'Operation cancelled by user.'
-                    return $false
-                }
-            }
-
-            # Respect -WhatIf / -Confirm
-            if ($PSCmdlet.ShouldProcess("Excel ($($procs.Count))", 'Stop-Process -Force')) {
-                try {
-                    $procs | Stop-Process -Force -ErrorAction SilentlyContinue
-                    Write-Verbose 'Successfully closed Excel.'
-                    return $true
-                } catch {
-                    Write-Error -ErrorRecord $_
-                    return $false
-                }
-            }
+        $la = $_.LastAccessTime
+        if (-not $lastAccessByDir.ContainsKey($dir) -or $la -gt $lastAccessByDir[$dir]) {
+            $lastAccessByDir[$dir] = $la
         }
     }
 
-    process {
-        if (-not $Recurse) {
-            # Single directory stats only
-            $files = Get-ChildItem -LiteralPath $Path -File -ErrorAction Stop
+    # --- Enumerate directories (also streaming) ---
+    Get-ChildItem -LiteralPath $rootPath -Directory -Recurse -Force -ErrorAction Stop | ForEach-Object {
+        $dir = $_.FullName.TrimEnd('\')
 
-            $fileStats = $files | Measure-Object -Property Length -Sum
-            $fileCount = $fileStats.Count
-
-            $directoryCount = (Get-ChildItem -LiteralPath $Path -Directory -ErrorAction Stop | Measure-Object).Count
-
-            $sizeMB = if ($fileStats.Sum) { [math]::Round($fileStats.Sum / 1MB, 3) } else { 0 }
-
-            $directoryOwner = (Get-Acl -LiteralPath $Path).Owner
-            $depth = 0
-
-            if ($files.Count -gt 0) {
-                $lastWrite = ($files | Measure-Object LastWriteTime -Maximum).Maximum
-                $lastAccess = ($files | Measure-Object LastAccessTime -Maximum).Maximum
-
-                $lastModifiedDate = $lastWrite.ToString('MM/dd/yyyy HH:mm')
-                $lastAccessDate = $lastAccess.ToString('MM/dd/yyyy HH:mm')
-            }
-
-            $output.Add([pscustomobject]@{
-                    Path           = $Path
-                    Parent         = $null
-                    Depth          = $depth
-                    Owner          = $directoryOwner
-                    FileCount      = $fileCount
-                    DirectoryCount = $directoryCount
-                    DirSizeInMB    = $sizeMB
-                    LastModified   = $lastModifiedDate
-                    LastAccessed   = $lastAccessDate
-                }) | Out-Null
-
-            return  # end block will handle runtime + return value
+        if ($MaxDepth -ne [int]::MaxValue) {
+            $rel = $dir.Substring($rootPath.Length).TrimStart('\')
+            $depth = if ($rel) { ($rel -split '\\').Count } else { 0 }
+            if ($depth -gt $MaxDepth) { return }
         }
 
-        # ---- Recursive version below ----
-
-        # Grab ALL directories once
-        $dirs = Get-ChildItem -LiteralPath $Path -Directory -Recurse -ErrorAction Stop
-
-        # Normalize directory paths (no trailing slashes)
-        $rootPath = $Path.TrimEnd('\')
-        $allDirs = @($rootPath) + ($dirs | ForEach-Object { $_.FullName.TrimEnd('\') })
-
-        # Grab ALL files once
-        $allFiles = Get-ChildItem -LiteralPath $Path -File -Recurse -ErrorAction Stop
-
-        # Group files by normalized directory name
-        $filesByDir = $allFiles | ForEach-Object {
-            $_ | Add-Member -NotePropertyName NormalizedDirectory `
-                -NotePropertyValue ($_.DirectoryName.TrimEnd('\')) -PassThru
-        } | Group-Object -Property NormalizedDirectory -AsHashTable -AsString
-
-
-        foreach ($dirPath in $allDirs) {
-
-            $dirFiles = if ($filesByDir.ContainsKey($dirPath)) { $filesByDir[$dirPath] } else { @() }
-
-            $fileStats = $dirFiles | Measure-Object -Property Length -Sum
-            $fileCount = $fileStats.Count
-            $sizeMB = if ($fileStats.Sum) { [math]::Round($fileStats.Sum / 1MB, 3) } else { 0 }
-
-            $childDirCount = ($dirs | Where-Object {
-                    ( $_.FullName.TrimEnd('\') | Split-Path -Parent ) -eq $dirPath
-                } | Measure-Object).Count
-
-            $owner = (Get-Acl -LiteralPath $dirPath).Owner
-
-            if ($dirPath -eq $rootPath) {
-                $depth = 0
-                $parent = $null
-            } else {
-                $relative = $dirPath.Substring($rootPath.Length).TrimStart('\')
-                $depth = ($relative -split '\\').Count
-
-                $parent = Split-Path -Path $dirPath -Parent
-                $parent = $parent.TrimEnd('\')
-                if ($parent -eq '') { $parent = $null }
-            }
-
-            # Avoid leaking values from previous iterations
-            $lastModifiedDate = $null
-            $lastAccessDate = $null
-
-            if ($dirFiles.Count -gt 0) {
-                $lastWrite = ($dirFiles | Measure-Object LastWriteTime -Maximum).Maximum
-                $lastAccess = ($dirFiles | Measure-Object LastAccessTime -Maximum).Maximum
-
-                $lastModifiedDate = $lastWrite.ToString('MM/dd/yyyy HH:mm')
-                $lastAccessDate = $lastAccess.ToString('MM/dd/yyyy HH:mm')
-            }
-
-            $output.Add([pscustomobject]@{
-                    Path           = $dirPath
-                    Parent         = $parent
-                    Depth          = $depth
-                    Owner          = $owner
-                    FileCount      = $fileCount
-                    DirectoryCount = $childDirCount
-                    DirSizeInMB    = $sizeMB
-                    LastModified   = $lastModifiedDate
-                    LastAccessed   = $lastAccessDate
-                }) | Out-Null
-        }
-
-
-
-        # Compute TotalSizeInMB bottom-up without O(n²)
-        $byPath = @{}
-        $children = @{}
-
-        foreach ($item in $output) {
-            $byPath[$item.Path] = $item
-            if ($item.Parent) {
-                if (-not $children.ContainsKey($item.Parent)) {
-                    $children[$item.Parent] = New-Object System.Collections.Generic.List[object]
-                }
-                $children[$item.Parent].Add($item) | Out-Null
-            }
-        }
-
-        foreach ($item in $output | Sort-Object Depth -Descending) {
-            $total = [decimal]$item.DirSizeInMB
-            if ($children.ContainsKey($item.Path)) {
-                foreach ($child in $children[$item.Path]) {
-                    $total += [decimal]$child.TotalSizeInMB
-                }
-            }
-            $item | Add-Member -NotePropertyName TotalSizeInMB -NotePropertyValue $total -Force
-        }
-
-    }
-    
-    end {
-        if ($script:Stopwatch) {
-            $script:Stopwatch.Stop()
-            $elapsed = $script:Stopwatch.Elapsed
-            
-            # Verbose message
-            Write-Verbose ('Get-DirTreeSize completed in {0:hh\:mm\:ss\.fff}' -f $elapsed)
-            
-            # Add runtime to root row (optional)
-            $root = $output | Where-Object { $_.Path -eq $Path } | Select-Object -First 1
-            if ($null -ne $root) {
-                $root | Add-Member -NotePropertyName TotalRuntimeSeconds -NotePropertyValue ([math]::Round($elapsed.TotalSeconds, 3)) -Force
-            }
-        }
-
-        # Export once at the end
-        if ($output.Count -gt 0 -and $Recurse) {
-            Stop-ExcelProcess -Force | Out-Null
-            Start-Sleep -Seconds 3
-            $leaf = Split-Path -Path $Path -Leaf
-            $output | Export-Excel -Path $ExportPath -WorksheetName $leaf -TableName "$($leaf)_Data" -AutoSize -ClearSheet
-        }
-
-        # Non-recursive calls return objects; recursive already exported, but you might still want the objects:
-        if ($output -and -not $Recurse) {
-            return $output
+        $dirSet.Add($dir) | Out-Null
+        if (-not $sizeBytesByDir.ContainsKey($dir)) {
+            $sizeBytesByDir[$dir] = 0L
+            $fileCountByDir[$dir] = 0
         }
     }
+
+    # Build list of dirs and compute parent/depth
+    $allDirs = $dirSet.ToArray()
+    $rows = New-Object System.Collections.Generic.List[object]
+
+    # Child mapping for totals and directory counts
+    $children = @{}
+    foreach ($dir in $allDirs) {
+        if ($dir -eq $rootPath) { continue }
+        $parent = (Split-Path -Path $dir -Parent).TrimEnd('\')
+        if (-not $children.ContainsKey($parent)) {
+            $children[$parent] = New-Object System.Collections.Generic.List[string]
+        }
+        $children[$parent].Add($dir) | Out-Null
+    }
+
+    foreach ($dir in $allDirs) {
+        $parent = if ($dir -eq $rootPath) { $null } else { (Split-Path -Path $dir -Parent).TrimEnd('\') }
+
+        $rel = if ($dir -eq $rootPath) { '' } else { $dir.Substring($rootPath.Length).TrimStart('\') }
+        $depth = if ($rel) { ($rel -split '\\').Count } else { 0 }
+
+        $dirBytes = [int64]$sizeBytesByDir[$dir]
+        $dirMB = [math]::Round($dirBytes / 1MB, 3)
+
+        $owner = $null
+        if (-not $SkipOwner) {
+            try { $owner = (Get-Acl -LiteralPath $dir -ErrorAction Stop).Owner } catch { $owner = $null }
+        }
+
+        $rows.Add([pscustomobject]@{
+                Path           = $dir
+                Parent         = $parent
+                Depth          = $depth
+                Owner          = $owner
+                FileCount      = [int]$fileCountByDir[$dir]
+                DirectoryCount = if ($children.ContainsKey($dir)) { $children[$dir].Count } else { 0 }
+                DirSizeInMB    = $dirMB
+                TotalSizeInMB  = 0.0  # filled later
+                LastModified   = if ($lastWriteByDir.ContainsKey($dir)) { $lastWriteByDir[$dir].ToString('MM/dd/yyyy HH:mm') } else { $null }
+                LastAccessed   = if ($lastAccessByDir.ContainsKey($dir)) { $lastAccessByDir[$dir].ToString('MM/dd/yyyy HH:mm') } else { $null }
+            }) | Out-Null
+    }
+
+    # --- Compute TotalSize bottom-up (directories only) ---
+    $byPath = @{}
+    foreach ($r in $rows) { $byPath[$r.Path] = $r }
+
+    foreach ($r in ($rows | Sort-Object Depth -Descending)) {
+        $total = [double]$r.DirSizeInMB
+        if ($children.ContainsKey($r.Path)) {
+            foreach ($c in $children[$r.Path]) {
+                $total += [double]$byPath[$c].TotalSizeInMB
+            }
+        }
+        $r.TotalSizeInMB = [math]::Round($total, 3)
+    }
+
+    $sw.Stop()
+    $rootRow = $byPath[$rootPath]
+    $rootRow | Add-Member -NotePropertyName TotalRuntimeSeconds -NotePropertyValue ([math]::Round($sw.Elapsed.TotalSeconds, 3)) -Force
+
+    # --- CSV export (fast, opens clean in Excel) ---
+    $rows |
+        Sort-Object Depth, Path |
+        Export-Csv -Path $ExportPath -NoTypeInformation -Encoding UTF8
+
+    Write-Verbose ('Exported {0} rows to {1}. Runtime: {2}' -f $rows.Count, $ExportPath, $sw.Elapsed)
+    $rows
 }
+ 

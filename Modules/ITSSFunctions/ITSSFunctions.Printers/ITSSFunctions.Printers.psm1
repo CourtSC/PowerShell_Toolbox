@@ -212,99 +212,100 @@ function Get-MHDPrinters {
     }
 }
 
-function Update-PrintDriver {
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High', DefaultParameterSetName = 'PrinterNames')]
-    param (
-        [Parameter(Mandatory, Position = 0, ParameterSetName = 'PrinterNames')]
-        [string[]]
-        $PrinterNames,
+# DEPRECATED
+# function Update-PrintDriver {
+#     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High', DefaultParameterSetName = 'PrinterNames')]
+#     param (
+#         [Parameter(Mandatory, Position = 0, ParameterSetName = 'PrinterNames')]
+#         [string[]]
+#         $PrinterNames,
 
-        [Alias('Path')]
-        [Parameter(Mandatory, ParameterSetName = 'CSVPath')]
-        [string]
-        $CSVPath,
+#         [Alias('Path')]
+#         [Parameter(Mandatory, ParameterSetName = 'CSVPath')]
+#         [string]
+#         $CSVPath,
 
-        [Parameter()]
-        [ValidateNotNullOrEmpty()]
-        [string[]] $Servers = @(
-            'ADCVPRNMHDMS001', 'ADCVPRNMHDMS002', 'ADCVPRNMHDMS003', 'ADCVPRNMHDMS004', 'ADCVPRNMHDMS005', 'ADCVPRNMHDMS006',
-            'ADCVPRNMHDMS020', 'ADCVPRNMHDMS021', 'ADCVPRNMHDMS022', 'ADCVPRNMHDMS023', 'ADCVPRNMHDMS024',
-            'ADCVPRNMHDMS030', 'ADCVPRNMHDMS031',
-            'ADCVPRNMHDMS040', 'ADCVPRNMHDMS041',
-            'ADCVPRNMHDMS050', 'ADCVPRNMHDMS051', 'ADCVPRNMHDMS052',
-            'ADCVPRNMHDMS060', 'ADCVPRNMHDMS061', 'ADCVPRNMHDMS062',
-            'ADCVPRNMHDMS070', 'ADCVPRNMHDMS071',
-            'ADCVPRNMHDMS080', 'ADCVPRNMHDMS081',
-            'ADCVPRNMHDMS500'
-        )
-    )
+#         [Parameter()]
+#         [ValidateNotNullOrEmpty()]
+#         [string[]] $Servers = @(
+#             'ADCVPRNMHDMS001', 'ADCVPRNMHDMS002', 'ADCVPRNMHDMS003', 'ADCVPRNMHDMS004', 'ADCVPRNMHDMS005', 'ADCVPRNMHDMS006',
+#             'ADCVPRNMHDMS020', 'ADCVPRNMHDMS021', 'ADCVPRNMHDMS022', 'ADCVPRNMHDMS023', 'ADCVPRNMHDMS024',
+#             'ADCVPRNMHDMS030', 'ADCVPRNMHDMS031',
+#             'ADCVPRNMHDMS040', 'ADCVPRNMHDMS041',
+#             'ADCVPRNMHDMS050', 'ADCVPRNMHDMS051', 'ADCVPRNMHDMS052',
+#             'ADCVPRNMHDMS060', 'ADCVPRNMHDMS061', 'ADCVPRNMHDMS062',
+#             'ADCVPRNMHDMS070', 'ADCVPRNMHDMS071',
+#             'ADCVPRNMHDMS080', 'ADCVPRNMHDMS081',
+#             'ADCVPRNMHDMS500'
+#         )
+#     )
     
-    begin {
-        Import-Module PrintManagement -ErrorAction Stop
+#     begin {
+#         Import-Module PrintManagement -ErrorAction Stop
 
-        $updatedDriver = 'HP Smart Universal Printing (v5.03.1)'
-        $count = 0
+#         $updatedDriver = 'HP Smart Universal Printing (v5.03.1)'
+#         $count = 0
 
-        # Write-Progress helper function
-        function Update-Progress {
-            [CmdletBinding()]
-            param (
-                [Parameter()]
-                [Int32]
-                $Count,
-                [Parameter()]
-                [Int32]
-                $Total,
-                [Parameter()]
-                [string]
-                $Target
-            )
-            $currProg = ($Count / $Total) * 100
-            Write-Progress -Activity "Processing driver change on $Target..." -Status "$currProg% Complete:" -PercentComplete $currProg
-        }
-    }
+#         # Write-Progress helper function
+#         function Update-Progress {
+#             [CmdletBinding()]
+#             param (
+#                 [Parameter()]
+#                 [Int32]
+#                 $Count,
+#                 [Parameter()]
+#                 [Int32]
+#                 $Total,
+#                 [Parameter()]
+#                 [string]
+#                 $Target
+#             )
+#             $currProg = ($Count / $Total) * 100
+#             Write-Progress -Activity "Processing driver change on $Target..." -Status "$currProg% Complete:" -PercentComplete $currProg
+#         }
+#     }
 
-    process {
-        if ($CSVPath) {
-            Write-Verbose "Importing printers from $CSVPath..."
-            $data = Import-Csv -Path $CSVPath
-            $nameProperty = ($data | Get-Member -MemberType NoteProperty)[0].Name
-            $PrinterNames = $data.$nameProperty
-            Write-Verbose $PrinterName
-        }
+#     process {
+#         if ($CSVPath) {
+#             Write-Verbose "Importing printers from $CSVPath..."
+#             $data = Import-Csv -Path $CSVPath
+#             $nameProperty = ($data | Get-Member -MemberType NoteProperty)[0].Name
+#             $PrinterNames = $data.$nameProperty
+#             Write-Verbose $PrinterName
+#         }
 
-        $printers = @()
-        foreach ($srv in $Servers) {
-            Write-Verbose "Getting printers from $srv."
-            $printers += Get-Printer -ComputerName $srv | Where-Object { $PrinterNames -contains $_.Name }
-        }
+#         $printers = @()
+#         foreach ($srv in $Servers) {
+#             Write-Verbose "Getting printers from $srv."
+#             $printers += Get-Printer -ComputerName $srv | Where-Object { $PrinterNames -contains $_.Name }
+#         }
 
-        foreach ($printer in $printers) {
-            try {
-                Update-Progress -Count $count -Total $printers.Count -Target $printer.Name -ErrorAction Stop
-                $count++
-            } catch { $_.Exception.Message }
-            if ($PSCmdlet.ShouldProcess($printer.Name, "Set driver to $updatedDriver")) {
-                try {
-                    Write-Verbose "Setting Shared and Published to false on $($printer.Name)."
-                    Set-Printer -ComputerName $printer.ComputerName -Name $printer.Name -Shared $false -Published $false -ErrorAction Stop
-                } catch { Write-Error "[Set-Printer] Failed to unshare $($printer.Name): $($_.Exception.Message)" }
+#         foreach ($printer in $printers) {
+#             try {
+#                 Update-Progress -Count $count -Total $printers.Count -Target $printer.Name -ErrorAction Stop
+#                 $count++
+#             } catch { $_.Exception.Message }
+#             if ($PSCmdlet.ShouldProcess($printer.Name, "Set driver to $updatedDriver")) {
+#                 try {
+#                     Write-Verbose "Setting Shared and Published to false on $($printer.Name)."
+#                     Set-Printer -ComputerName $printer.ComputerName -Name $printer.Name -Shared $false -Published $false -ErrorAction Stop
+#                 } catch { Write-Error "[Set-Printer] Failed to unshare $($printer.Name): $($_.Exception.Message)" }
 
-                try {
-                    Write-Verbose "Setting driver to $updatedDriver on $($printer.Name)."
-                    Set-Printer -ComputerName $printer.ComputerName -Name $printer.Name -DriverName $updatedDriver -ErrorAction Stop
-                } catch { Write-Error "[Set-Printer] Failed to update driver on $($printer.Name): ($($_.Exception.Message))" }
+#                 try {
+#                     Write-Verbose "Setting driver to $updatedDriver on $($printer.Name)."
+#                     Set-Printer -ComputerName $printer.ComputerName -Name $printer.Name -DriverName $updatedDriver -ErrorAction Stop
+#                 } catch { Write-Error "[Set-Printer] Failed to update driver on $($printer.Name): ($($_.Exception.Message))" }
 
-                try {
-                    Write-Verbose "Setting Shared to true and ShareName to $($printer.Name)."
-                    Set-Printer -ComputerName $printer.ComputerName -Name $printer.Name -Shared $true -ShareName $printer.Name -ErrorAction Stop
-                } catch { Write-Error "[Set-Printer] Failed to share $($printer.Name): $($_.Exception.Message)" }
+#                 try {
+#                     Write-Verbose "Setting Shared to true and ShareName to $($printer.Name)."
+#                     Set-Printer -ComputerName $printer.ComputerName -Name $printer.Name -Shared $true -ShareName $printer.Name -ErrorAction Stop
+#                 } catch { Write-Error "[Set-Printer] Failed to share $($printer.Name): $($_.Exception.Message)" }
 
-                Get-Printer -ComputerName $printer.ComputerName -Name $printer.Name | Format-List
-            }
-        }
-    }
-}
+#                 Get-Printer -ComputerName $printer.ComputerName -Name $printer.Name | Format-List
+#             }
+#         }
+#     }
+# }
 
 function Get-PrintersWithErrors {
     [CmdletBinding()]
@@ -313,8 +314,16 @@ function Get-PrintersWithErrors {
         [string]$Domain = 'multihosp.net',
 
         [Parameter()]
-        [string[]]$Servers
+        [string[]]$Servers,
+
+        [Parameter()]
+        [switch]$Remove,
+
+        [Parameter()]
+        [switch]$Nuke
     )
+
+    if ($Nuke) { $Remove = $true }
 
     if (($Domain -eq 'multihosp.net') -and (-not $Servers)) {
         $Servers = @(
@@ -331,92 +340,63 @@ function Get-PrintersWithErrors {
         }
     }
 
-    return $printers
-}
+    if ($Remove) {
+        # Process print jobs and collect results
+        $results = $printers | ForEach-Object -Parallel {
+            $printer = $_
+            $summary = @()
 
-function Remove-PrintJobsWithErrors {
-    [CmdletBinding()]
-    param (
-        [Parameter()]
-        [string]$Domain = 'multihosp.net',
-
-        [Parameter()]
-        [string[]]$Servers,
-
-        [Parameter()]
-        [switch]$Nuke
-    )
-
-    if (($Domain -eq 'multihosp.net') -and (-not $Servers)) {
-        $Servers = @(
-            'ADCVPRNMHDMS001', 'ADCVPRNMHDMS002', 'ADCVPRNMHDMS003', 'ADCVPRNMHDMS004',
-            'ADCVPRNMHDMS005', 'ADCVPRNMHDMS006'
-        )
-    }
-
-    # Collect all printers with errors
-    $printers = foreach ($server in $Servers) {
-        try {
-            Get-Printer -ComputerName $server -ErrorAction Stop | Where-Object { $_.PrinterStatus -eq 'Error' }
-        } catch {
-            Write-Warning "Failed to get printers from $($server): $_"
-        }
-    }
-
-    # Process print jobs and collect results
-    $results = $printers | ForEach-Object -Parallel {
-        $printer = $_
-        $summary = @()
-
-        try {
-            if ($Nuke) {
-                $jobs = Get-PrintJob -PrinterObject $printer
-            } else {
-                $jobs = Get-PrintJob -PrinterObject $printer | Where-Object { $_.JobStatus -like '*error*' }
-            }
-
-            foreach ($job in $jobs) {
-                $status = 'Success'
-                $message = ''
-
-                try {
-                    Remove-PrintJob -InputObject $job -ErrorAction Stop
-                } catch {
-                    $status = 'Failed'
-                    $message = $_.Exception.Message
-
-                    if ($message -match 'Access was denied to the specified resource') {
-                        Write-Warning "Access denied on [$($printer.ComputerName)] for [$($printer.Name)]"
-                    } else {
-                        Write-Warning "Failed to remove job on [$($printer.ComputerName)]: $message"
-                    }
+            try {
+                if ($Nuke) {
+                    $jobs = Get-PrintJob -PrinterObject $printer
+                } else {
+                    $jobs = Get-PrintJob -PrinterObject $printer | Where-Object { $_.JobStatus -like '*error*' }
                 }
 
+                foreach ($job in $jobs) {
+                    $status = 'Success'
+                    $message = ''
+
+                    try {
+                        Remove-PrintJob -InputObject $job -ErrorAction Stop
+                    } catch {
+                        $status = 'Failed'
+                        $message = $_.Exception.Message
+
+                        if ($message -match 'Access was denied to the specified resource') {
+                            Write-Warning "Access denied on [$($printer.ComputerName)] for [$($printer.Name)]"
+                        } else {
+                            Write-Warning "Failed to remove job on [$($printer.ComputerName)]: $message"
+                        }
+                    }
+
+                    $summary += [PSCustomObject]@{
+                        Server   = $printer.ComputerName
+                        Printer  = $printer.Name
+                        JobId    = $job.ID
+                        Document = $job.DocumentName
+                        Status   = $status
+                        Message  = $message
+                    }
+                }
+            } catch {
                 $summary += [PSCustomObject]@{
                     Server   = $printer.ComputerName
                     Printer  = $printer.Name
-                    JobId    = $job.ID
-                    Document = $job.DocumentName
-                    Status   = $status
-                    Message  = $message
+                    JobId    = $null
+                    Document = $null
+                    Status   = 'Failed'
+                    Message  = "Failed to retrieve print jobs: $($_.Exception.Message)"
                 }
             }
-        } catch {
-            $summary += [PSCustomObject]@{
-                Server   = $printer.ComputerName
-                Printer  = $printer.Name
-                JobId    = $null
-                Document = $null
-                Status   = 'Failed'
-                Message  = "Failed to retrieve print jobs: $($_.Exception.Message)"
-            }
-        }
 
-        return $summary
-    } -ThrottleLimit 5
+            return $summary
+        } -ThrottleLimit 5
+    } else { $results = $printers }
 
     # Flatten and return all job results
     return $results | ForEach-Object { $_ } | Sort-Object Server, Printer, Status
+    
 }
 
 function Remove-PrinterPortSNMP {
@@ -1508,7 +1488,35 @@ function Repair-Printer {
     param (
         [Parameter(Mandatory, Position = 0)]
         [string[]]
-        $Name
+        $Name,
+
+        [Parameter()]
+        [string[]]
+        $Servers = @('ADCVPRNMHDMS001', `
+                'ADCVPRNMHDMS002', `
+                'ADCVPRNMHDMS003', `
+                'ADCVPRNMHDMS004', `
+                'ADCVPRNMHDMS005', `
+                'ADCVPRNMHDMS006', `
+                'ADCVPRNMHDMS020', `
+                'ADCVPRNMHDMS021', `
+                'ADCVPRNMHDMS022', `
+                'ADCVPRNMHDMS023', `
+                'ADCVPRNMHDMS024', `
+                'ADCVPRNMHDMS030', `
+                'ADCVPRNMHDMS031', `
+                'ADCVPRNMHDMS040', `
+                'ADCVPRNMHDMS041', `
+                'ADCVPRNMHDMS050', `
+                'ADCVPRNMHDMS051', `
+                'ADCVPRNMHDMS052', `
+                'ADCVPRNMHDMS060', `
+                'ADCVPRNMHDMS061', `
+                'ADCVPRNMHDMS062', `
+                'ADCVPRNMHDMS070', `
+                'ADCVPRNMHDMS071', `
+                'ADCVPRNMHDMS080', `
+                'ADCVPRNMHDMS081')
     )
 
     begin {
@@ -1517,7 +1525,7 @@ function Repair-Printer {
     }
 
     process {
-        $printer = $mhdPrintServers | ForEach-Object -Parallel { 
+        $printer = $Servers | ForEach-Object -Parallel { 
             Get-Printer -ComputerName $_ -Name $Name -ErrorAction SilentlyContinue | Select-Object $props 
         }
 
@@ -1536,5 +1544,140 @@ function Repair-Printer {
                 Add-Printer @printerHash
             }
         }
+    }
+}
+
+function Set-InitialPrinterConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Position = 0, Mandatory)]
+        [string]$Server,
+
+        [Parameter(Position = 1, Mandatory)]
+        [string]$PrinterName,
+
+        [Parameter(Position = 2)]
+        [string]
+        $PrinterModel
+    )
+
+    begin {
+        $printProperties = @{
+            'Config:DuplexUnit'         = 'Installed'
+            'Config:JobStorageControl'  = 'auto'
+            'Config:AccessoryOutputBin' = 'NoOutputBin'
+            'Config:SecurePrintControl' = 'auto'
+            'Config:TintTestingControl' = 'disable'
+        }
+
+        function Get-AvailablePrintDrivers {
+            param ($Server, $PrinterModel)
+
+            $installedDrivers = Get-PrinterDriver -ComputerName $Server | Where-Object { $_.Name -like "*$PrinterModel*" }
+            
+            if ($installedDrivers.Count -eq 1) {
+                $selectedDriver = $installedDrivers.Name
+            }
+
+            if ($installedDrivers.Count -gt 1) {
+                Write-Host "Multiple drivers available for $PrinterModel on $Server"
+                $idx = 0
+                foreach ($drvr in $installedDrivers) {
+                    Write-Host "$($idx): $($drvr.Name)"
+                    $idx++
+                }
+                [int]$selectedIdx = Read-Host 'Please select the preferred driver'
+                $selectedDriver = $installedDrivers[$selectedIdx].Name
+            }
+
+            if ($installedDrivers.Count -eq 0) {
+                throw "No driver found for $PrinterModel on $Server."
+            }
+
+            return $selectedDriver
+        }
+
+        Write-Verbose "Configuring printer '$PrinterName' on server '$Server'..."
+    }
+
+    process {
+        $results = @()
+
+        if ($PrinterModel) {
+            try {
+                $selectedPrintDriver = Get-AvailablePrintDrivers $Server $PrinterModel -ErrorAction Stop
+                try {
+                    $currentPrintDriver = Get-Printer -ComputerName $Server -Name $PrinterName -ErrorAction Stop | Select-Object -ExpandProperty DriverName 
+                } catch {
+                    Write-Error "[Get-Printer]: $($_.Exception.Message)"
+                }
+
+                if ($selectedPrintDriver -ne $currentPrintDriver) {
+                    Set-Printer -ComputerName $Server -Name $PrinterName -DriverName $selectedPrintDriver -ErrorAction Stop
+                    Write-Verbose "✔ Set $PrinterName to use $selectedPrintDriver."
+                } else { Write-Verbose "✔ $PrinterName is already set to use $currentPrintDriver." }
+
+                $results += [PSCustomObject]@{
+                    Setting = 'Driver'
+                    Value   = $selectedPrintDriver
+                    Status  = 'Success'
+                }
+            } catch {
+                Write-Error "[Set-Printer]: $($_.Exception.Message)" 
+                return
+            }
+        }
+
+        try {
+            Set-PrintConfiguration `
+                -ComputerName $Server `
+                -PrinterName $PrinterName `
+                -DuplexingMode OneSided `
+                -PaperSize Letter `
+                -Collate $true `
+                -Color $true
+
+            Write-Verbose '✔ Base print configuration applied successfully.'
+
+            $results += [PSCustomObject]@{
+                Setting = 'BaseConfiguration'
+                Value   = 'Applied'
+                Status  = 'Success'
+            }
+        } catch {
+            Write-Error "Failed to apply base print configuration: $_"
+        }
+
+        foreach ($property in $printProperties.GetEnumerator()) {
+            try {
+                Set-PrinterProperty `
+                    -ComputerName $Server `
+                    -PrinterName $PrinterName `
+                    -PropertyName $property.Name `
+                    -Value $property.Value `
+                    -ErrorAction Stop
+
+                Write-Verbose "✔ Set $($property.Name) = $($property.Value)"
+
+                $results += [PSCustomObject]@{
+                    Setting = $property.Name
+                    Value   = $property.Value
+                    Status  = 'Success'
+                }
+            } catch {
+                Write-Verbose "✖ Failed to set $($property.Name): $_"
+
+                $results += [PSCustomObject]@{
+                    Setting = $property.Name
+                    Value   = $property.Value
+                    Status  = 'Failed'
+                }
+            }
+        }
+    }
+
+    end {
+        Write-Verbose 'Printer configuration complete.'
+        return $results
     }
 }
