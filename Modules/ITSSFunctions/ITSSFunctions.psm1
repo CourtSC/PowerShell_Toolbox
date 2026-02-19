@@ -1195,7 +1195,8 @@ function Get-DirTreeSize {
     $fileCountByDir = @{}
     $lastWriteByDir = @{}
     $lastAccessByDir = @{}
-    $dirSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    $dirSet = [System.Collections.Generic.HashSet[string]]::new()
+
 
     # Ensure root exists in tables
     $dirSet.Add($rootPath) | Out-Null
@@ -1252,7 +1253,30 @@ function Get-DirTreeSize {
     }
 
     # Build list of dirs and compute parent/depth
-    $allDirs = $dirSet.ToArray()
+    # Build list of directories in a robust way
+    if ($null -eq $dirSet) {
+        throw 'Unexpected: dirSet is null'
+    }
+
+    # If dirSe# Build list of directories in a robust way
+    if ($null -eq $dirSet) {
+        throw 'Unexpected: dirSet is null'
+    }
+
+    if ($dirSet -is [System.Array]) {
+        $allDirs = $dirSet
+    } elseif ($dirSet -is [System.Collections.IEnumerable]) {
+        try {
+            $allDirs = $dirSet.ToArray()
+        } catch {
+            $allDirs = @($dirSet)
+        }
+
+        # Normalize to strings
+        $allDirs = $allDirs | ForEach-Object { $_.ToString() }
+    } else {
+        $allDirs = @($dirSet.ToString())
+    }
     $rows = New-Object System.Collections.Generic.List[object]
 
     # Child mapping for totals and directory counts
