@@ -107,11 +107,6 @@ function Get-DirTreeSize {
     }
 
     # Build list of dirs and compute parent/depth
-    # Build list of directories in a robust way
-    if ($null -eq $dirSet) {
-        throw 'Unexpected: dirSet is null'
-    }
-
     if ($null -eq $dirSet) {
         throw 'Unexpected: dirSet is null'
     }
