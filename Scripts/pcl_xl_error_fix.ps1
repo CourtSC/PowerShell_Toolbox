@@ -83,7 +83,8 @@ $sb = {
             Expand-Archive 'C:\Temp\HPSPARKTools.zip' -DestinationPath 'C:\Temp\HPSPARKTools\' -Force 
         }
 
-        Get-ChildItem -Path 'C:\Windows\System32\spool\drivers' -Recurse -Filter $infFileName | ForEach-Object { Remove-Item $_.FullName }
+        # Remove the driver .cab and spooler temp files.
+        Get-ChildItem -Path 'C:\Windows\System32\spool\drivers' -Recurse -Filter "*$infFileName*" | ForEach-Object { Remove-Item $_.FullName }
         Get-ChildItem -Path 'C:\Windows\System32\spool\PRINTERS' | ForEach-Object { Remove-Item $_.FullName }
     
         Restart-Service Spooler -ErrorAction SilentlyContinue
