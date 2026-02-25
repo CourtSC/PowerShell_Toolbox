@@ -112,7 +112,6 @@ function Get-DirTreeSize {
         throw 'Unexpected: dirSet is null'
     }
 
-    # If dirSe# Build list of directories in a robust way
     if ($null -eq $dirSet) {
         throw 'Unexpected: dirSet is null'
     }
