@@ -76,8 +76,8 @@ function Install-RemotePrintDriver {
 
     begin {
         # ==== HARD-LOCKED DRIVER METADATA (do not change to install anything else) ====
-        $DriverName = 'HP Universal Printing PCL 6 (v7.0.0)'
-        $ExpectedInfFile = 'hpcu250u.inf'
+        $DriverName = 'HP Universal Printing PCL 6 (v7.8.0)'
+        $ExpectedInfFile = 'hpcu340u.inf'
         $RemoteRoot = 'C:\Temp\HPUPD'
         $DesiredEnvelopeKB = 4096
 
