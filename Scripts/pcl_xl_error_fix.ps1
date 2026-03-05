@@ -25,13 +25,11 @@ $sb = {
 
 if ($PSCmdlet.ParameterSetName -eq 'Session') {
     Invoke-Command -Session $Session -ScriptBlock $sb
-    shutdown /r /m \\$session.ComputerName /f /t 60 /c 'Computer will restart in 60 seconds to apply updates. Please save your work.'
 } elseif ($PSCmdlet.ParameterSetName -eq 'ComputerName') {
     if (-not $Credential) {
         $Credential = Get-Credential -Message 'Enter you admin (OPID-A) credentials.'
     }
     Invoke-Command -ComputerName $ComputerName -Credential $Credential -ScriptBlock $sb
-    shutdown /r /m \\$ComputerName /f /t 60 /c 'Computer will restart in 60 seconds to apply updates. Please save your work.'
 }
 
 
