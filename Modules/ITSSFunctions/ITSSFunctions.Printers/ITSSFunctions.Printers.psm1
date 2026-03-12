@@ -430,7 +430,7 @@ function Remove-PrinterPortSNMP {
     }
 }
 
-function Install-RemotePrintDriver {
+function Install-PrinterDriver {
     <#
     .SYNOPSIS
     Installs a single, approved print driver on one or more remote computers. No other driver is allowed.
@@ -470,11 +470,11 @@ function Install-RemotePrintDriver {
     Max concurrent calls when using -ComputerName. Default 16.
 
     .EXAMPLE
-    PS> 'PC01','PC02' | Install-RemotePrintDriver -Credential (Get-Credential) -Verbose
+    PS> 'PC01','PC02' | Install-PrinterDriver -Credential (Get-Credential) -Verbose
 
     .EXAMPLE
     PS> $s = New-PSSession -ComputerName 'PC01','PC02'
-    PS> Install-RemotePrintDriver -Session $s -Confirm
+    PS> Install-PrinterDriver -Session $s -Confirm
 
     .NOTES
     - Approved driver only: Name = "HP Universal Printing PCL 6 (v7.0.0)", INF = "hpcu250u.inf".
