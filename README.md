@@ -46,7 +46,7 @@ winget install -e --id Git.Git
 
 ### Setting Powershell 7 as Default
 
-1. Open `Settings (ctrl +,)`.
+1. With Terminal as the active window, open `Settings (ctrl +,)`.
 2. Set the default profile as `PowerShell 7`.
 	1. *Note* PowerShell 7 must be installed before launching Terminal for it to appear as an option.
 
