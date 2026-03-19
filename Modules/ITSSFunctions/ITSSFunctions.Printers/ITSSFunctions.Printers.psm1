@@ -507,9 +507,72 @@ function Install-PrinterDriver {
     )
 
     begin {
+
+        # Prompt user to select driver from list of available drivers.
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+
+        $drivers = Get-PrinterDriver
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = 'Select a Print Driver'
+        $form.StartPosition = 'CenterScreen'
+        $form.Size = New-Object System.Drawing.Size(500, 600)
+        $form.TopMost = $true
+
+        $panel = New-Object System.Windows.Forms.FlowLayoutPanel
+        $panel.Dock = 'Fill'
+        $panel.AutoScroll = $true
+        $panel.WrapContents = $false
+        $panel.FlowDirection = 'TopDown'
+        $form.Controls.Add($panel)
+
+        foreach ($driver in $drivers) {
+            $btn = New-Object System.Windows.Forms.Button
+            $btn.Text = $driver.Name
+            $btn.Width = 440
+            $btn.Height = 35
+            $btn.Margin = New-Object System.Windows.Forms.Padding(10, 10, 10, 0)
+
+            # Store the whole driver object in the button
+            $btn.Tag = $driver
+
+            $btn.Add_Click({
+                    $selected = $this.Tag
+
+                    # Build your output object
+                    $result = [PSCustomObject]@{
+                        Name    = $selected.Name
+                        InfFile = ($selected.InfPath -split '\\')[-1]
+                    }
+
+                    $form.Tag = $result
+                    $form.Close()
+                })
+
+            $panel.Controls.Add($btn)
+        }
+
+        # Cancel button
+        $cancel = New-Object System.Windows.Forms.Button
+        $cancel.Text = 'Cancel'
+        $cancel.Width = 440
+        $cancel.Height = 35
+        $cancel.Margin = New-Object System.Windows.Forms.Padding(10, 20, 10, 10)
+        $cancel.Add_Click({
+                $form.Tag = $null
+                $form.Close()
+            })
+        $panel.Controls.Add($cancel)
+
+        [void]$form.ShowDialog()
+
+        # Final result object
+        $printerDriver = $form.Tag
+
         # ==== HARD-LOCKED DRIVER METADATA (do not change to install anything else) ====
-        $DriverName = 'HP Universal Printing PCL 6 (v7.0.0)'
-        $ExpectedInfFile = 'hpcu250u.inf'
+        $DriverName = $printerDriver.Name
+        $ExpectedInfFile = $printerDriver.InfFile
         $RemoteRoot = 'C:\Temp\HPUPD'
         $DesiredEnvelopeKB = 4096
 
