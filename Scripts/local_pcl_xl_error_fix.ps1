@@ -1,4 +1,3 @@
-
 Stop-Service Spooler -ErrorAction SilentlyContinue
 
 Get-ChildItem -Path 'C:\Windows\System32\spool\drivers' -Recurse -Filter '*.gpd' | ForEach-Object { Remove-Item $_.FullName }
