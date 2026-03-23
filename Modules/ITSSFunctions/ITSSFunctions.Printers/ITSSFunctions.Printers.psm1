@@ -1414,71 +1414,66 @@ function Get-ADPrinters {
     }
 }
 
-function Repair-Printer {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory, Position = 0)]
-        [string[]]
-        $Name,
-
-        [Parameter()]
-        [string[]]
-        $Servers = @('ADCVPRNMHDMS001', `
-                'ADCVPRNMHDMS002', `
-                'ADCVPRNMHDMS003', `
-                'ADCVPRNMHDMS004', `
-                'ADCVPRNMHDMS005', `
-                'ADCVPRNMHDMS006', `
-                'ADCVPRNMHDMS020', `
-                'ADCVPRNMHDMS021', `
-                'ADCVPRNMHDMS022', `
-                'ADCVPRNMHDMS023', `
-                'ADCVPRNMHDMS024', `
-                'ADCVPRNMHDMS030', `
-                'ADCVPRNMHDMS031', `
-                'ADCVPRNMHDMS040', `
-                'ADCVPRNMHDMS041', `
-                'ADCVPRNMHDMS050', `
-                'ADCVPRNMHDMS051', `
-                'ADCVPRNMHDMS052', `
-                'ADCVPRNMHDMS060', `
-                'ADCVPRNMHDMS061', `
-                'ADCVPRNMHDMS062', `
-                'ADCVPRNMHDMS070', `
-                'ADCVPRNMHDMS071', `
-                'ADCVPRNMHDMS080', `
-                'ADCVPRNMHDMS081')
-    )
-
-    begin {
-        $printerHash = @{}
-        $props = @('ComputerName', 'Name', 'Location', 'Comment', 'DriverName', 'ShareName', 'Shared', 'PortName')
-    }
-
-    process {
-        $printer = $Servers | ForEach-Object -Parallel { 
-            Get-Printer -ComputerName $_ -Name $Name -ErrorAction SilentlyContinue | Select-Object $props 
-        }
-
-        if ($printer) {
-            $printer.psobject.Properties | ForEach-Object {
-                $printerHash[$_.Name] = $_.Value
-            }
-            try {
-                # Remove-Printer isn't working for some reason...
-                $removeResult = Remove-Printer -ComputerName $printer.ComputerName -Name $printer.Name -ErrorAction Stop
-            } catch {
-                Write-Error "Failed to remove $($printer.Name) from $($printer.ComputerName): ($($_.Exception.Message))"
-            }
-
-            if ($removeResult) {
-                Add-Printer @printerHash
-            }
-        }
-    }
-}
-
 function Set-InitialPrinterConfig {
+    <#
+    .SYNOPSIS
+    Applies the initial printer configuration for a printer on a remote print server.
+
+    .DESCRIPTION
+    Set-InitialPrinterConfig applies a standard baseline printer configuration to the
+    specified printer on the specified server. The function always applies the base
+    configuration and printer properties.
+
+    If -PrinterModel is provided, the function looks for installed printer drivers on
+    the target server whose names match the supplied model. When exactly one driver
+    matches, that driver is selected automatically. When multiple drivers match, the
+    function prompts you to choose the preferred driver. If no matching driver is
+    found, the function throws an error.
+
+    After determining the driver, the function compares it to the printer's current
+    driver. If the selected driver is different, the printer is updated to use it.
+    Then the function applies the base print configuration and a set of printer
+    properties. A result object is returned for each attempted setting, indicating
+    success or failure.
+
+    .PARAMETER Server
+    The name of the print server that hosts the printer.
+
+    .PARAMETER PrinterName
+    The name of the printer to configure on the server.
+
+    .PARAMETER PrinterModel
+    Optional printer model name used to locate a matching driver on the server.
+    When more than one matching driver is found, you are prompted to select one.
+
+    .INPUTS
+    None.
+    You cannot pipe input to this function.
+
+    .OUTPUTS
+    System.Management.Automation.PSCustomObject
+    Returns one or more objects describing each configuration step, including:
+    Setting, Value, and Status.
+
+    .EXAMPLE
+    PS> Set-InitialPrinterConfig -Server "PRN-SRV01" -PrinterName "HP-404" -PrinterModel "HP LaserJet"
+
+    Looks up a matching driver on the server, prompts if multiple drivers are found,
+    applies the selected driver if needed, and then applies the base printer
+    configuration and printer properties.
+
+    .EXAMPLE
+    PS> Set-InitialPrinterConfig -Server "PRN-SRV01" -PrinterName "HP-404"
+
+    Applies the base printer configuration and printer properties without changing the
+    printer driver.
+
+    .NOTES
+    - Requires the PrintManagement module.
+    - Uses Get-PrinterDriver, Get-Printer, Set-Printer, Set-PrintConfiguration, and Set-PrinterProperty.
+    - If multiple drivers match -PrinterModel, the function uses Read-Host to prompt for selection.
+    - The function writes verbose output for progress and warnings/errors for failures.
+    #>
     [CmdletBinding()]
     param (
         [Parameter(Position = 0, Mandatory)]

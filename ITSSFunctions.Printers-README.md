@@ -471,12 +471,54 @@ The first example retrieves printers created in the last 6 months from the defau
 
 ---
 
-## Repair-Printer
-
-_No inline documentation found._
-
----
-
 ## Set-InitialPrinterConfig
 
-_No inline documentation found._
+### SYNOPSIS
+Applies the initial printer configuration for a printer on a remote print server.
+
+### DESCRIPTION
+`Set-InitialPrinterConfig` applies a standard baseline printer configuration to the specified printer on the specified server. The function always applies the base configuration and printer properties.
+
+If `-PrinterModel` is provided, the function looks for installed printer drivers on the target server whose names match the supplied model. When exactly one driver matches, that driver is selected automatically. When multiple drivers match, the function prompts you to choose the preferred driver. If no matching driver is found, the function throws an error.
+
+After determining the driver, the function compares it to the printer's current driver. If the selected driver is different, the printer is updated to use it. Then the function applies the base print configuration and a set of printer properties. A result object is returned for each attempted setting, indicating success or failure.
+
+### PARAMETERS
+
+#### -Server
+The name of the print server that hosts the printer.
+
+#### -PrinterName
+The name of the printer to configure on the server.
+
+#### -PrinterModel
+Optional printer model name used to locate a matching driver on the server. When more than one matching driver is found, you are prompted to select one.
+
+### INPUTS
+None.  
+You cannot pipe input to this function.
+
+### OUTPUTS
+
+#### System.Management.Automation.PSCustomObject
+Returns one or more objects describing each configuration step, including `Setting`, `Value`, and `Status`.
+
+### EXAMPLES
+
+#### Example 1
+```powershell
+Set-InitialPrinterConfig -Server "PRN-SRV01" -PrinterName "HP-404" -PrinterModel "HP LaserJet"
+```
+Looks up a matching driver on the server, prompts if multiple drivers are found, applies the selected driver if needed, and then applies the base printer configuration and printer properties.
+
+#### Example 2
+```powershell
+Set-InitialPrinterConfig -Server "PRN-SRV01" -PrinterName "HP-404"
+```
+Applies the base printer configuration and printer properties without changing the printer driver.
+
+### NOTES
+- Requires the `PrintManagement` module.
+- Uses `Get-PrinterDriver`, `Get-Printer`, `Set-Printer`, `Set-PrintConfiguration`, and `Set-PrinterProperty`.
+- If multiple drivers match `-PrinterModel`, the function uses `Read-Host` to prompt for selection.
+- The function writes verbose output for progress and warnings/errors for failures.
