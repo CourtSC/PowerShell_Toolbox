@@ -40,7 +40,6 @@ winget install -e --id Git.Git
 
 ## ITSS Library
 
-> [!info]
 > Requires Git
 
 ```PowerShell
