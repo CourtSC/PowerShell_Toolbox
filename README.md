@@ -37,6 +37,19 @@ Microsoft Visual Studio Code is a code editor redefined and optimized for buildi
 ```PowerShell
 winget install -e --id Git.Git
 ```
+
+## ITSS Library
+
+> [!info]
+> Requires Git
+
+```PowerShell
+cd ($profile | Split-Path)
+git clone https://github.com/CourtSC/PowerShell_Toolbox.git
+Add-Content -Path $profile -Value "Import-Module ITSSFunctions -Force"
+cd ~
+```
+
 ## Settng up Terminal
 
 1. Open `Settings`.
