@@ -213,6 +213,73 @@ function Get-MHDPrinters {
 }
 
 function Get-PrintersWithErrors {
+    <#
+    .SYNOPSIS
+    Gets printers that are in an Error or Offline state, and optionally removes their print jobs.
+
+    .DESCRIPTION
+    Get-PrintersWithErrors queries one or more print servers for printers whose status is
+    Error or Offline. By default, it returns the matching printer objects.
+
+    When -Remove is specified, the function also inspects each affected printer's print jobs.
+    By default, only jobs with an error-related status are removed. When -Nuke is specified,
+    all jobs on the affected printers are removed instead.
+
+    If -Domain is left at its default value of 'multihosp.net' and -Servers is not specified,
+    the function uses the built-in list of known print servers.
+
+    The function writes warnings when printer or job retrieval fails, but it continues processing
+    the remaining servers and printers.
+
+    .PARAMETER Domain
+    The domain name used to determine whether the default printer server list should be applied.
+    The default is 'multihosp.net'.
+
+    .PARAMETER Servers
+    One or more print servers to query. If omitted and -Domain is 'multihosp.net', the function
+    uses the built-in default server list.
+
+    .PARAMETER Remove
+    When specified, the function removes print jobs from affected printers. By default, only jobs
+    with an error-related status are removed.
+
+    .PARAMETER Nuke
+    When specified, all print jobs are removed from affected printers instead of only error jobs.
+    This switch also implies -Remove.
+
+    .INPUTS
+    System.String
+
+    .OUTPUTS
+    System.Object
+
+    The function returns either printer objects, or job summary objects when -Remove is used.
+    Job summary objects include Server, Printer, JobId, Document, Status, and Message.
+
+    .EXAMPLE
+    Get-PrintersWithErrors
+
+    Queries the default MHD print servers in the multihosp.net domain and returns printers
+    that are in an Error or Offline state.
+
+    .EXAMPLE
+    Get-PrintersWithErrors -Servers 'ADCVPRNMHDMS001','ADCVPRNMHDMS002' -Remove
+
+    Queries the specified servers and removes only print jobs that have an error-related status.
+
+    .EXAMPLE
+    Get-PrintersWithErrors -Servers 'ADCVPRNMHDMS001' -Nuke
+
+    Queries the specified server and removes all print jobs from printers that are in an Error
+    or Offline state.
+
+    .NOTES
+    Requires the PrintManagement module.
+
+    PowerShell 7+ is required for ForEach-Object -Parallel.
+
+    The function sorts results by Server, Printer, and Status before returning them.
+    #>
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -239,7 +306,9 @@ function Get-PrintersWithErrors {
 
     $printers = foreach ($server in $Servers) {
         try {
-            Get-Printer -ComputerName $server -ErrorAction Stop | Where-Object { ($_.PrinterStatus -eq 'Error') -or (($_.PrinterStatus -eq 'Offline')) }
+            Get-Printer -ComputerName $server -ErrorAction Stop | Where-Object {
+                ($_.PrinterStatus -eq 'Error') -or ($_.PrinterStatus -eq 'Offline')
+            }
         } catch {
             Write-Warning "Failed to get printers from $($server): $_"
         }
@@ -297,191 +366,85 @@ function Get-PrintersWithErrors {
 
             return $summary
         } -ThrottleLimit 5
-    } else { $results = $printers }
+    } else {
+        $results = $printers
+    }
 
     # Flatten and return all job results
     return $results | ForEach-Object { $_ } | Sort-Object Server, Printer, Status
-    
-}
-
-function Remove-PrinterPortSNMP {
-    [CmdletBinding(SupportsShouldProcess = $true)]
-    param(
-        [Parameter()]
-        [string[]] $Servers = @(
-            'ADCVPRNMHDMS001',
-            'ADCVPRNMHDMS002',
-            'ADCVPRNMHDMS003',
-            'ADCVPRNMHDMS004',
-            'ADCVPRNMHDMS005',
-            'ADCVPRNMHDMS006'
-        ),
-        [string] $LogPath
-    )
-
-    begin {
-        $script:LogToFile = { param($Level, $Message)
-            if ($PSBoundParameters.ContainsKey('LogPath')) {
-                $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $Level, $Message
-                Add-Content -Path $LogPath -Value $line
-            }
-        }
-
-        function Write-LogInfo { param($m) Write-Information $m -InformationAction Continue; & $script:LogToFile 'INFO' $m }
-        function Write-LogWarn { param($m) Write-Warning $m; & $script:LogToFile 'WARN' $m }
-        function Write-LogVerbose { param($m) Write-Verbose $m; & $script:LogToFile 'VERBOSE' $m }
-        function Write-LogError {
-            param($m, $e)
-            $detail = if ($e) { '{0} | {1} | {2}' -f $e.FullyQualifiedErrorId, $e.CategoryInfo, $e.Exception.Message } else { '' }
-            Write-Error -Message "$m $detail"
-            & $script:LogToFile 'ERROR' "$m $detail"
-        }
-
-        if ($PSBoundParameters.ContainsKey('LogPath')) {
-            $null = New-Item -ItemType Directory -Path (Split-Path $LogPath) -Force -ErrorAction SilentlyContinue
-            Add-Content -Path $LogPath -Value ('=' * 80)
-            Add-Content -Path $LogPath -Value ('Run started {0}' -f (Get-Date))
-        }
-
-        Write-LogInfo "Starting Remove-PrinterPortSNMP on $($Servers.Count) server(s)."
-    }
-
-    process {
-        foreach ($srv in $Servers) {
-            Write-LogInfo "---- Server: $srv ----"
-
-            try {
-                $ports = Get-PrinterPort -ComputerName $srv -ErrorAction Stop | Where-Object { $_.SNMPEnabled }
-
-                if (-not $ports) {
-                    Write-LogVerbose "No SNMP-enabled ports found on $srv."
-                    continue
-                }
-
-                Write-LogInfo ('Found {0} SNMP-enabled port(s) on {1}.' -f $ports.Count, $srv)
-
-                foreach ($port in $ports) {
-                    $portSummary = "Port '{0}' ({1}:{2})" -f $port.Name, $port.PrinterHostAddress, $port.PortNumber
-                    Write-LogInfo "Processing $portSummary on $srv."
-
-                    try {
-                        if ($PSCmdlet.ShouldProcess("$srv | $portSummary", 'Replace port to disable SNMP')) {
-
-                            $tempName = 'temp'
-                            $existingTemp = Get-PrinterPort -ComputerName $srv -Name $tempName -ErrorAction SilentlyContinue
-                            if (-not $existingTemp) {
-                                Add-PrinterPort -ComputerName $srv -Name $tempName -PrinterHostAddress $port.PrinterHostAddress -PortNumber $port.PortNumber -ErrorAction Stop
-                                Write-LogVerbose "Created temp port on $srv."
-                            } else {
-                                Write-LogVerbose "Temp port already exists on $srv; reusing."
-                            }
-
-                            $printersOnPort = Get-Printer -ComputerName $srv -ErrorAction Stop | Where-Object { $_.PortName -eq $port.Name }
-                            if ($printersOnPort) {
-                                foreach ($printer in $printersOnPort) {
-                                    Set-Printer -InputObject $printer -PortName $tempName -ErrorAction Stop
-                                    Write-LogInfo "Repointed printer '{0}' to temp." -f $printer.Name
-                                }
-                            } else {
-                                Write-LogVerbose "No printers currently using $($port.Name) on $srv."
-                            }
-
-                            Remove-PrinterPort -InputObject $port -ErrorAction Stop
-                            Write-LogInfo "Removed SNMP-enabled port $($port.Name) on $srv."
-
-                            Add-PrinterPort -ComputerName $srv -Name $port.Name -PrinterHostAddress $port.PrinterHostAddress -PortNumber $port.PortNumber -ErrorAction Stop
-                            Write-LogInfo "Recreated port $($port.Name) on $srv (SNMP disabled)."
-
-                            if ($printersOnPort) {
-                                foreach ($printer in $printersOnPort) {
-                                    Set-Printer -InputObject $printer -PortName $port.Name -ErrorAction Stop
-                                    Write-LogInfo "Repointed printer '{0}' back to {1}." -f $printer.Name, $port.Name
-                                }
-                            }
-
-                            $printersOnTemp = Get-Printer -ComputerName $srv -ErrorAction Stop | Where-Object { $_.PortName -eq $tempName }
-                            if (-not $printersOnTemp) {
-                                Remove-PrinterPort -ComputerName $srv -Name $tempName -ErrorAction SilentlyContinue
-                                Write-LogVerbose "Removed temp port from $srv."
-                            } else {
-                                Write-LogWarn "Temp port still in use on $srv; skipping removal."
-                            }
-
-                            Write-LogInfo "Completed $portSummary on $srv."
-                        }
-                    } catch {
-                        Write-LogError "Failed while processing $portSummary on $srv." $_
-                        continue
-                    }
-                }
-            } catch {
-                Write-LogError "Failed to enumerate ports or printers on $srv." $_
-                continue
-            }
-        }
-    }
-
-    end {
-        Write-LogInfo 'Remove-PrinterPortSNMP run complete.'
-        if ($PSBoundParameters.ContainsKey('LogPath')) {
-            Add-Content -Path $LogPath -Value ('Run ended {0}' -f (Get-Date))
-            Add-Content -Path $LogPath -Value ('=' * 80)
-        }
-    }
 }
 
 function Install-PrinterDriver {
     <#
     .SYNOPSIS
-    Installs a single, approved print driver on one or more remote computers. No other driver is allowed.
+    Installs a selected printer driver on one or more remote computers.
 
     .DESCRIPTION
-    This command is hard-locked to install the **HP Universal Printing PCL 6 (v7.0.0)** driver, from the exact
-    INF **hpcu250u.inf**, which must already be present/staged on the local machine. The function copies the local
-    driver’s directory to each remote machine (C:\Temp\HPUPD) and uses pnputil to add that INF, then registers the
-    driver via Add-PrinterDriver.
+    Install-PrinterDriver presents an interactive Windows Forms selector populated with
+    the printer drivers currently installed on the local computer. After you choose a
+    driver, the function validates that the selected driver exists locally, ensures the
+    required driver files are staged on each target computer, and then installs the
+    selected driver remotely.
 
-    In addition, to support larger remoting payloads, it ensures **WSMan MaxEnvelopeSizekb = 4096** on the **local**
-    computer (before any remoting starts) and on **each remote** computer as soon as a session is established. If the
-    current value is already >= 4096 it is left unchanged.
+    The function supports targeting computers by name or by existing PSSession objects.
+    When -ComputerName is used, you can optionally provide -Credential. When -Session is
+    used, -Credential is ignored. Only sessions created by this function are removed at
+    the end of execution.
 
-    You can target computers via -ComputerName (with optional -Credential) or pass existing -Session objects.
-    Only sessions created by this function are removed on completion.
+    To support larger remoting payloads, the function ensures WSMan MaxEnvelopeSizekb
+    is at least 4096 on the local computer before any remoting begins, and on each
+    remote computer before driver files are copied or installation starts.
 
-    The operation honors -WhatIf / -Confirm.
+    The operation honors -WhatIf and -Confirm.
+
+    Because the driver is selected interactively, this function is intended for an
+    interactive desktop session and is not suitable for unattended execution.
+
+    .PARAMETER ComputerName
+    One or more computer names to install the selected driver on. Accepts pipeline input.
+
+    .PARAMETER Session
+    One or more existing PSSession objects to use. If specified, -Credential is ignored.
+
+    .PARAMETER Credential
+    Credentials for remoting when using -ComputerName. Ignored when -Session is used.
+
+    .PARAMETER ThrottleLimit
+    Maximum concurrent calls when using -ComputerName. Default is 16.
 
     .INPUTS
-    System.String, Microsoft.PowerShell.Commands.PSSession
+    System.String
+    You can pipe computer names to -ComputerName.
+
+    Microsoft.PowerShell.Commands.PSSession
+    You can pipe existing sessions to -Session.
 
     .OUTPUTS
     System.Management.Automation.PSCustomObject
-    Properties: ComputerName, DriverName, Installed, Version, InfPath
-
-    .PARAMETER ComputerName
-    One or more computer names to install the driver on. Accepts pipeline input.
-
-    .PARAMETER Session
-    One or more existing PSSessions to use. If specified, -Credential is ignored.
-
-    .PARAMETER Credential
-    Credentials for remoting when using -ComputerName. (Ignored with -Session.)
-
-    .PARAMETER ThrottleLimit
-    Max concurrent calls when using -ComputerName. Default 16.
+    Returns a verification object for each target computer containing ComputerName,
+    DriverName, Installed, Version, and InfPath.
 
     .EXAMPLE
     PS> 'PC01','PC02' | Install-PrinterDriver -Credential (Get-Credential) -Verbose
+
+    Opens the driver selector, lets you choose a local driver, and installs that driver
+    on the specified computers using remoting credentials.
 
     .EXAMPLE
     PS> $s = New-PSSession -ComputerName 'PC01','PC02'
     PS> Install-PrinterDriver -Session $s -Confirm
 
+    Uses existing sessions to install the selected local printer driver on the remote
+    computers.
+
     .NOTES
-    - Approved driver only: Name = "HP Universal Printing PCL 6 (v7.0.0)", INF = "hpcu250u.inf".
-    - Requires the driver to be installed/staged on the local machine first.
-    - Requires admin rights on target machines; uses pnputil and Add-PrinterDriver remotely.
-    - Ensures WSMan MaxEnvelopeSizekb >= 4096 locally and on each remote. Administrative rights are required.
-    - PowerShell 7+ recommended.
+    - Uses an interactive Windows Forms selector to choose from locally installed printer drivers.
+    - Requires the selected driver to already be installed or staged on the local machine.
+    - Requires administrative rights on the target machines.
+    - Uses pnputil and Add-PrinterDriver remotely.
+    - Ensures WSMan MaxEnvelopeSizekb is at least 4096 locally and on each target.
+    - PowerShell 7+ is recommended.
+    - Intended for interactive use only.
 
     .LINK
     about_Remote
