@@ -1,6 +1,6 @@
 # ITSSFunctions Module Reference
 
-This document describes the functions in `ITSSFunctions.psm1` in a PowerShell help style format, adapted for a GitHub README.
+This document describes the functions in `ITSSFunctions.psm1`.
 
 ## Requirements
 
