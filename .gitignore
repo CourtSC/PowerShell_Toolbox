@@ -4,3 +4,4 @@ Modules/*
 Help/
 Microsoft.PowerShell_profile.ps1
 Scripts/process_H_drive_CSVs.ps1
+Scripts/batch_h_drive_email.ps1
