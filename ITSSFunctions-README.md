@@ -10,7 +10,7 @@ Some functions in this module depend on external modules or environmental setup:
 - **ActiveDirectory** for `Get-ADUser`, `Get-ADGroup`, `Get-ADComputer`, and related cmdlets.
 - **PowerShell remoting** for remote queries and remote actions.
 - **Windows desktop Excel** for functions that stop Excel processes.
-- Several functions use the global credential variable **`$global:cred`**.
+- Several functions accept optional `-Credential` parameters for remoting or Active Directory operations.
 
 ---
 
@@ -184,7 +184,7 @@ Uses an existing remote session.
 
 ### NOTES
 - Queries `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` and `HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`.
-- The function uses `$global:cred` when connecting by computer name.
+- The function uses the provided `-Credential` value when connecting by computer name.
 - Requires registry access on the remote computer.
 
 ---
@@ -214,7 +214,7 @@ The MSI product code to uninstall. Must be in the form `{XXXXXXXX-XXXX-XXXX-XXXX
 A complete uninstall command line for non-MSI uninstallers.
 
 #### -Credential
-Optional credential used for `Invoke-Command`. Defaults to `$global:cred`.
+Optional credential used for `Invoke-Command`.
 
 ### INPUTS
 None directly.
@@ -517,7 +517,7 @@ Sends the same custom message to both remote computers.
 
 ### NOTES
 - Requires PowerShell remoting to be enabled.
-- Uses `$global:cred` for authentication.
+- Uses the provided `-Credential` parameter for authentication.
 - Requires the ActiveDirectory module.
 - Sends the message with the Windows `msg` command.
 

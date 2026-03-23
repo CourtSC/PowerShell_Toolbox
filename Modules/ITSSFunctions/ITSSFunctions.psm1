@@ -150,7 +150,7 @@ function Get-Locked {
         [System.Management.Automation.Runspaces.PSSession[]]$Session,
 
         [Parameter(ParameterSetName = 'ComputerName')]
-        [pscredential]$Credential,
+        [System.Management.Automation.PSCredential]$Credential,
 
         [Parameter()]
         [switch]$Monitor,
@@ -294,6 +294,9 @@ function Get-InstalledSoftware {
         [Parameter(Mandatory = $true, ParameterSetName = 'ComputerName')]
         [string[]]$ComputerName,
 
+        [Parameter(Mandatory = $true, ParameterSetName = 'ComputerName')]
+        [System.Management.Automation.PSCredential]$Credential,
+
         [Parameter(Mandatory = $true, ParameterSetName = 'Session')]
         [System.Management.Automation.Runspaces.PSSession[]]$Session,
 
@@ -346,7 +349,7 @@ function Get-InstalledSoftware {
 
     switch ($PSCmdlet.ParameterSetName) {
         'ComputerName' {
-            Invoke-Command -ComputerName $ComputerName -Credential $global:cred -ScriptBlock $scriptBlock -ArgumentList $Filter
+            Invoke-Command -ComputerName $ComputerName -Credential $Credential -ScriptBlock $scriptBlock -ArgumentList $Filter
         }
         'Session' {
             Invoke-Command -Session $Session -ScriptBlock $scriptBlock -ArgumentList $Filter
@@ -375,7 +378,7 @@ function Remove-Software {
     A complete uninstall command string (non-MSI uninstallers).
 
     .PARAMETER Credential
-    Optional credential for Invoke-Command. Defaults to $global:cred.
+    Optional credential for Invoke-Command.
 
     .EXAMPLE
     Remove-Software -ComputerName 'WS-12345' -GUID '{12345678-1234-1234-1234-1234567890AB}'
@@ -399,7 +402,7 @@ function Remove-Software {
         [string]$UninstallString,
 
         [Parameter()]
-        [System.Management.Automation.PSCredential]$Credential = $global:cred
+        [System.Management.Automation.PSCredential]$Credential
     )
 
     if (-not $GUID -and -not $UninstallString) {
@@ -867,84 +870,6 @@ function Get-CommonADGroups {
     $commonGroups
 }
 
-function New-PopupMessage {
-    <#
-    .SYNOPSIS
-    Sends a personalized popup message to the currently logged-in user on one or more remote computers.
-
-    .DESCRIPTION
-    The New-PopupMessage function connects to each specified computer using PowerShell remoting, retrieves the currently logged-in user's OPID (username), looks up the user's full name in Active Directory, and sends a popup message using the `msg` command. The message is personalized with the user's first and last name. Each session is removed after the message is sent.
-
-    This function is useful for IT administrators who need to send real-time, personalized notifications to users across multiple systems.
-
-    .PARAMETER Computers
-    Specifies one or more computer names to which the popup message should be sent. The function will attempt to establish a remote session with each computer and send a message to the currently logged-in user.
-
-    .EXAMPLE
-    New-PopupMessage -Computers 'WS-12345'
-
-    Sends a personalized popup message to the user currently logged into the computer named 'WS-12345'.
-
-    .EXAMPLE
-    New-PopupMessage -Computers 'WS-12345', 'WS-67890'
-
-    Sends personalized popup messages to users currently logged into both 'WS-12345' and 'WS-67890'.
-
-    .OUTPUTS
-    None. The function writes status messages to the console and sends popup messages to remote users.
-
-    .NOTES
-    - Requires PowerShell remoting to be enabled on the target computers.
-    - Uses the global variable `$global:cred` for authentication.
-    - The message is sent using the `msg` command and includes the user's given name and surname.
-    - If no user is logged in, a warning is displayed and the session is skipped.
-    - Each PowerShell session is removed after use to free up resources.
-    - Requires the ActiveDirectory module for user lookup.
-    #>
-
-    [CmdletBinding()]
-    param (
-        [string[]]$Computers,
-        [string]$Message
-    )
-
-    foreach ($computer in $Computers) {
-        try {
-            Write-Output "Connecting to $computer..."
-            $session = New-PSSession -ComputerName $computer -Credential $global:cred
-
-            $opid = Invoke-Command -Session $session -ScriptBlock {
-                (Get-CimInstance -ClassName Win32_ComputerSystem).UserName
-            }
-
-            if (-not $opid) {
-                Write-Warning "No user logged in on $computer."
-                Remove-PSSession $session
-                continue
-            } else {
-                $username = $opid.Split('\')[-1]
-                $user = Get-ADUser -Identity $username -Properties GivenName, Surname
-            }
-
-            if ($user) {
-                if (-not $Message) { $messageString = "Hello, $($user.GivenName) $($user.Surname)!" } else { $messageString = $Message }
-                Write-Output "Sending message to $username on $($computer): $messageString"
-
-                Invoke-Command -Session $session -ScriptBlock {
-                    param ($targetUser, $msg)
-                    msg $targetUser $msg
-                } -ArgumentList $username, $messageString
-            } else {
-                Write-Warning "User $username not found in AD."
-            }
-
-            Remove-PSSession $session
-        } catch {
-            Write-Error "Failed to process $($computer): $_"
-        }
-    }
-}
-
 function Get-DuressTagUsers {
     [CmdletBinding()]
     param (
@@ -1074,7 +999,7 @@ function Remove-ADObjects {
 
         [Parameter(Mandatory, Position = 1)]
         [ValidateNotNull()]
-        [pscredential]$Credential,
+        [System.Management.Automation.PSCredential]$Credential,
 
         [Parameter()]
         [string]$Server,
