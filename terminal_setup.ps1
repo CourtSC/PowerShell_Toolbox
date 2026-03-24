@@ -20,9 +20,11 @@ if ( $pwshGuid ) {
 
 } else {
     if ($PSCmdlet.ShouldContinue('Relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
-        $wtPath = (Get-Command wt.exe).Path
-        Start-Process $wtPath
-        pwsh.exe -ExecutionPolicy bypass "$env:OneDrive\Documents\PowerShell\terminal_setup.ps1"
+        if ($PSCmdlet.ShouldContinue('Do you want to apply recommended settings to Windows Terminal?', 'You can apply optional but recommended settings automatically.')) {
+            wt pwsh.exe -NoExit -ExecutionPolicy bypass "$env:OneDrive\Documents\PowerShell\terminal_setup.ps1"
+        } else {
+            Start-Process wt
+        }
         exit
     }
 }

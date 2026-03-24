@@ -1,8 +1,13 @@
 [CmdletBinding()]
 param()
-$opid = Read-Host 'OPID'
-if (-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid*" })) {
-    Add-LocalGroupMember -Name 'Administrators' -Member $opid
+$opid = whoami.exe
+if (-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid" })) {
+    if ($PSCmdlet.ShouldContinue("Add $opid as a local admin?", 'You need to be a local admin running Terminal with your Domain account.')) {
+        Add-LocalGroupMember -Name 'Administrators' -Member $opid
+    }
+    if ($PSCmdlet.ShouldContinue('Logout?', 'You need to log out and back in for local admin changes to take effect.')) {
+        logoff.exe
+    }
 }
 
 winget install --id Microsoft.Powershell --source winget
@@ -49,10 +54,10 @@ Set-Location ~
 "
 
 if ($PSCmdlet.ShouldContinue('Relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
-    $wtPath = (Get-Command wt.exe).Path
-    Start-Process $wtPath
     if ($PSCmdlet.ShouldContinue('Do you want to apply recommended settings to Windows Terminal?', 'You can apply optional but recommended settings automatically.')) {
-        pwsh.exe -ExecutionPolicy bypass "$env:OneDrive\Documents\PowerShell\terminal_setup.ps1"
+        wt pwsh.exe -NoExit -ExecutionPolicy bypass "$env:OneDrive\Documents\PowerShell\terminal_setup.ps1"
+    } else {
+        Start-Process wt
     }
     exit
 }
