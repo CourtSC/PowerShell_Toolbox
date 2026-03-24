@@ -1,7 +1,14 @@
+[CmdletBinding()]
+param()
+$opid = Read-Host 'OPID'
+if (-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid*" })) {
+    Add-LocalGroupMember -Name 'Administrators' -Member $opid
+}
+
 winget install --id Microsoft.Powershell --source winget
-Add-LocalGroupMember -Name 'Administrators' -Member ( Read-Host 'OPID' )
 winget install -e --id Microsoft.VisualStudioCode
 winget install -e --id Git.Git
+
 pwsh -NoProfile -Command "
 `$profilePath = `$PROFILE
 `$profileDir  = Split-Path -Parent `$profilePath
@@ -40,3 +47,12 @@ if (`$profileText -notmatch [regex]::Escape(`$importLine)) {
 
 Set-Location ~
 "
+
+if ($PSCmdlet.ShouldContinue('Relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
+    $wtPath = (Get-Command wt.exe).Path
+    Start-Process $wtPath
+    if ($PSCmdlet.ShouldContinue('Do you want to apply recommended settings to Windows Terminal?', 'You can apply optional but recommended settings automatically.')) {
+        pwsh.exe -ExecutionPolicy bypass "$env:OneDrive\Documents\PowerShell\terminal_setup.ps1"
+    }
+    exit
+}
