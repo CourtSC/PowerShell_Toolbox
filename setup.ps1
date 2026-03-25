@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-$opid = whoami.exe
+$opid = (whoami.exe).Replace('-a', '')
 
 if (-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid" })) {
     if ($PSCmdlet.ShouldContinue("Add $opid as a local admin?", 'You need to be a local admin running Terminal with your Domain account.')) {
