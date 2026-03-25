@@ -3,7 +3,7 @@ param()
 
 $opid = (whoami.exe).Replace('-a', '')
 
-if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid" }) -or (whoami.exe -ne $opid) )) {
+if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid" }) -or ((whoami.exe) -ne $opid) )) {
     if ($PSCmdlet.ShouldContinue("Add $opid as a local admin?", 'You need to be a local admin running Terminal with your Domain account.')) {
         Add-LocalGroupMember -Name 'Administrators' -Member $opid
     }
@@ -23,7 +23,7 @@ if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -
 
     # Ensure profile exists (PS7 only)
     if ($PSVersionTable.PSVersion.Major -ge 7) {
-        $profilePath = $PROFILE
+        $profilePath = "$env:OneDrive\Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
         $profileDir = Split-Path -Parent $profilePath
 
         if (-not (Test-Path -Path $profilePath)) {
@@ -68,6 +68,7 @@ if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -
             }
         }
     } elseif ($PSVersionTable.PSVersion.Major -lt 7) {
+        New-Item
         Write-Host 'Make sure to use PowerShell 7 when creating your profile.' -ForegroundColor Yellow
         if ($PSCmdlet.ShouldContinue('Relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
             if ($PSCmdlet.ShouldContinue('Do you want to apply recommended settings to Windows Terminal?', 'You can apply optional but recommended settings automatically.')) {
