@@ -69,5 +69,14 @@ if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -
         }
     } elseif ($PSVersionTable.PSVersion.Major -lt 7) {
         Write-Host 'Make sure to use PowerShell 7 when creating your profile.' -ForegroundColor Yellow
+        if ($PSCmdlet.ShouldContinue('Relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
+            if ($PSCmdlet.ShouldContinue('Do you want to apply recommended settings to Windows Terminal?', 'You can apply optional but recommended settings automatically.')) {
+                wt pwsh.exe -File "$env:OneDrive\Documents\PowerShell\terminal_setup.ps1"
+                exit
+            } else {
+                Start-Process wt
+                exit
+            }
+        }
     }
 }
