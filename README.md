@@ -68,6 +68,13 @@ cd ~
 - `Settings > Defaults > Appearance` Change to a Monospaced font.
 	- [JetBrains Mono: A free and open source typeface for developers | JetBrains: Developer Tools for Professionals and Teams](https://www.jetbrains.com/lp/mono/)
 
+#### Setup via Terminal
+```PowerShell
+if (-not ((New-Object System.Drawing.Text.InstalledFontCollection).Families | Where-Object { $_.Name -like '*JetBrains*' })) {
+    winget install -e --id DEVCOM.JetBrainsMonoNerdFont
+}
+```
+
 ## Setting up $PROFILE
 
 
