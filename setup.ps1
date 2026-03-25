@@ -15,6 +15,9 @@ function Start-Countdown {
 }
 
 $opid = (whoami.exe).Replace('-a', '')
+winget install --id Microsoft.Powershell --source winget
+winget install -e --id Microsoft.VisualStudioCode
+winget install -e --id Git.Git
 
 if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid" }) -or ((whoami.exe) -ne $opid) )) {
     if ($PSCmdlet.ShouldContinue("Add $opid as a local admin?", 'You need to be a local admin running Terminal with your Domain account.')) {
@@ -26,10 +29,6 @@ if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -
         exit
     }
 } else {
-    winget install --id Microsoft.Powershell --source winget
-    winget install -e --id Microsoft.VisualStudioCode
-    winget install -e --id Git.Git
-
     # Ensure profile exists (PS7 only)
     $profilePath = "$env:OneDrive\Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
     $profileDir = Split-Path -Parent $profilePath
