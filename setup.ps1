@@ -3,7 +3,7 @@ param()
 
 $opid = (whoami.exe).Replace('-a', '')
 
-if (-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid" })) {
+if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid" }) -or (whoami.exe -ne $opid) )) {
     if ($PSCmdlet.ShouldContinue("Add $opid as a local admin?", 'You need to be a local admin running Terminal with your Domain account.')) {
         Add-LocalGroupMember -Name 'Administrators' -Member $opid
     }
