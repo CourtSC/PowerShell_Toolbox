@@ -82,6 +82,7 @@ $currSettings.defaultProfile = '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
 
 if ($PSCmdlet.ShouldContinue('Do you want to apply recommended settings to Windows Terminal?', 'You can apply optional but recommended settings automatically.')) {
     # Install JetBrains Mono
+    [System.Reflection.Assembly]::LoadWithPartialName('System.Drawing') | Out-Null
     if (-not ((New-Object System.Drawing.Text.InstalledFontCollection).Families | Where-Object { $_.Name -like '*JetBrains*' })) {
         wt winget install -e --id DEVCOM.JetBrainsMonoNerdFont
     }
