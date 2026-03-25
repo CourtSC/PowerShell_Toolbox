@@ -48,11 +48,6 @@ function Start-Countdown {
     }
 }
 
-$opid = (whoami.exe).Replace('-a', '')
-winget install --id Microsoft.Powershell --source winget
-winget install -e --id Microsoft.VisualStudioCode
-winget install -e --id Git.Git
-
 # Configure Terminal Settings
 $currSettings = Get-Content "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json" | ConvertFrom-Json
 
@@ -74,25 +69,34 @@ if ($PSCmdlet.ShouldContinue('Do you want to apply recommended settings to Windo
     if (-not ((New-Object System.Drawing.Text.InstalledFontCollection).Families | Where-Object { $_.Name -like '*JetBrains*' })) {
         wt winget install -e --id DEVCOM.JetBrainsMonoNerdFont
     }
-
-    $currSettings.profiles.defaults.colorScheme = 'Campbell'
-    $currSettings.profiles.defaults.font.face = 'JetBrains Mono'
-    $currSettings.profiles.defaults.font.size = 16
+    
+    $currSettings.profiles.defaults = [PSCustomObject]@{
+        colorScheme = 'Campbell'
+        font        = [PSCustomObject]@{
+            face = 'JetBrains Mono'
+            size = 16
+        }
+    }
 }
 
 $currSettings | ConvertTo-Json -Depth 100 | Set-Content -Path "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"
 
+$opid = (whoami.exe).Replace('-a', '')
 if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -like "*$opid" }) -or ((whoami.exe) -ne $opid) )) {
     if ($PSCmdlet.ShouldContinue("Add $opid as a local admin?", 'You need to be a local admin running Terminal with your Domain account.')) {
         Add-LocalGroupMember -Name 'Administrators' -Member $opid
     }
     if ($PSCmdlet.ShouldContinue('Logout?', 'You need to log out and back in for local admin changes to take effect.')) {
-        # Register-ResumeTask -TaskName $TaskName -ScriptPath $PSCommandPath
+        Register-ResumeTask -TaskName $TaskName -ScriptPath $PSCommandPath
         Start-Countdown -Seconds 5
         logoff.exe
         exit
     }
 } else {
+    winget install --id Microsoft.Powershell --source winget
+    winget install -e --id Microsoft.VisualStudioCode
+    winget install -e --id Git.Git
+    
     # Ensure profile exists (PS7 only)
     $profilePath = "$env:OneDrive\Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
     $profileDir = Split-Path -Parent $profilePath
