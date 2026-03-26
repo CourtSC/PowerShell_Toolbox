@@ -93,7 +93,6 @@ if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -
         exit
     }
 } else {
-    winget install --id Microsoft.Powershell --source winget
     winget install -e --id Microsoft.VisualStudioCode
     winget install -e --id Git.Git
     
@@ -133,9 +132,11 @@ if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -
 }
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
-    if ($PSCmdlet.ShouldContinue('Relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
-        Start-Countdown -Seconds 5
+    if ($PSCmdlet.ShouldContinue('Install PowerShell 7 and relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
+        winget install --id Microsoft.Powershell --source winget
         exit
     }
+} else {
+    winget install --id Microsoft.Powershell --source winget
 }
 
