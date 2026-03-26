@@ -131,8 +131,5 @@ if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -
     Set-Location ~
 }
 
-if ($PSCmdlet.ShouldContinue('Install PowerShell 7 and relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
-    winget install --id Microsoft.Powershell --source winget
-    exit
-}
-
+Write-Warning -Message 'Terminal will need to be relaunched if PowerShell 7 is being installed or upgraded.'
+winget install --id Microsoft.Powershell --source winget
