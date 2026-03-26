@@ -131,12 +131,8 @@ if ((-not (Get-LocalGroupMember -Group Administrators | Where-Object { $_.name -
     Set-Location ~
 }
 
-if ($PSVersionTable.PSVersion.Major -lt 7) {
-    if ($PSCmdlet.ShouldContinue('Install PowerShell 7 and relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
-        winget install --id Microsoft.Powershell --source winget
-        exit
-    }
-} else {
+if ($PSCmdlet.ShouldContinue('Install PowerShell 7 and relaunch Terminal now?', 'Terminal must be relaunched after installing PowerShell 7.')) {
     winget install --id Microsoft.Powershell --source winget
+    exit
 }
 
