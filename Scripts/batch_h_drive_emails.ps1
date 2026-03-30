@@ -1,11 +1,16 @@
-# load CSV of rows assigned to you
-$data = Import-Csv -Path 'C:\Users\sco941\Downloads\CFD SDM Resource Team Leader Assignments.csv' |
-    Where-Object { $_.'ITSS Resource' -eq 'Court, Scott' }
+[CmdletBinding()]
+param(
+    [string]$Path
+)
+
+$data = Import-Csv -Path $Path | Where-Object { ($_.'ITSS Resource' -eq 'Court, Scott') -and ($_.'Project Status (For AIT)' -eq 'Not Started') }
 
 if (-not $data -or $data.Count -eq 0) {
     Write-Host "No rows found for 'Court, Scott'."
     return
 }
+
+$nextFri = ((Get-Date).AddDays(([DayOfWeek]::Friday - $date.DayOfWeek + 7) % 7)).ToString('MM/dd/yyyy')
 
 # Try to get/create Outlook COM object with retries
 function Get-OutlookApplication {
@@ -62,16 +67,13 @@ I will need your written confirmation for documentation.
 </p>
 
 <p>
-If possible, please send your response by Friday, 3/13/2026.
+If possible, please send your response by Friday, $nextFri.
 </p>
 
 <p>
-Thank you,
-
-Scott C. Court
-
-AdventHealth
-
+Thank you,<br><br>
+Scott C. Court<br>
+AdventHealth<br>
 IT Support Specialist - Senior | Orlando
 </p>
 "@
