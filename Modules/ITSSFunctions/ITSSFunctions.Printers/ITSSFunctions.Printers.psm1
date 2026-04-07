@@ -725,6 +725,12 @@ function Install-PrinterDriver {
                     Invoke-Command -Session $s -ErrorAction Stop -ScriptBlock $installScript -ArgumentList $DriverName, $RemoteRoot, $ExpectedInfFile
                 } catch {
                     Write-Error "Installation failed on '$cn': $($_.Exception.Message)"
+                    $errObject = [PSCustomObject]@{
+                        DriverName      = $DriverName
+                        RemoteRoot      = $RemoteRoot
+                        ExpectedInfFile = $ExpectedInfFile
+                    }
+                    Write-Error $errObject
                     continue
                 }
             }
