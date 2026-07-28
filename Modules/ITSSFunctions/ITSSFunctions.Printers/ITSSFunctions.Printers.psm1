@@ -1621,47 +1621,290 @@ function Get-PrinterInfo {
         [string]$Name,
 
         [Parameter(Position = 1)]
-        [string]$ComputerName
+        [string]$ComputerName,
+
+        [Parameter()]
+        [ValidateRange(1, 60)]
+        [int]$TimeoutSec = 5,
+
+        [Parameter()]
+        [ValidateRange(1, 65535)]
+        [int]$PjlPort = 9100
     )
 
-    $regex = '<strong class="product">\s*(?<Model>[^<]+)\s*</strong>'
+    begin {
+        $printerParams = @{
+            ErrorAction = 'Stop'
+        }
 
-    $printerParams = @{
-        ErrorAction = 'Stop'
-    }
+        $portCache = @{}
 
-    foreach ($key in 'Name', 'ComputerName') {
-        if ($PSBoundParameters.ContainsKey($key)) {
-            $printerParams[$key] = $PSBoundParameters[$key]
+        function Get-PjlResponse {
+            [CmdletBinding()]
+            param(
+                [Parameter(Mandatory)]
+                [string]$Address,
+
+                [Parameter(Mandatory)]
+                [int]$Port,
+
+                [Parameter(Mandatory)]
+                [string]$PjlCommand,
+
+                [Parameter(Mandatory)]
+                [int]$TimeoutSec
+            )
+
+            $tcpClient = $null
+            $stream = $null
+            $rawResponse = $null
+
+            try {
+                Write-Verbose "Connecting to $Address on port $Port..."
+
+                $tcpClient = [System.Net.Sockets.TcpClient]::new()
+                $connectTask = $tcpClient.ConnectAsync($Address, $Port)
+
+                if (-not $connectTask.Wait($TimeoutSec * 1000)) {
+                    throw "PJL connection timed out to $Address on port $Port."
+                }
+
+                $tcpClient.SendTimeout = $TimeoutSec * 1000
+                $tcpClient.ReceiveTimeout = $TimeoutSec * 1000
+
+                $stream = $tcpClient.GetStream()
+                $stream.ReadTimeout = $TimeoutSec * 1000
+                $stream.WriteTimeout = $TimeoutSec * 1000
+
+                $bytes = [System.Text.Encoding]::ASCII.GetBytes($PjlCommand)
+                Write-Verbose 'Sending PJL command.'
+
+                $stream.Write($bytes, 0, $bytes.Length)
+                $stream.Flush()
+
+                Start-Sleep -Milliseconds 200
+
+                $buffer = New-Object byte[] 4096
+                $sb = [System.Text.StringBuilder]::new()
+                $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+                while ($stopwatch.ElapsedMilliseconds -lt ($TimeoutSec * 1000)) {
+                    if ($stream.DataAvailable) {
+                        $read = $stream.Read($buffer, 0, $buffer.Length)
+                        if ($read -le 0) {
+                            break
+                        }
+
+                        [void]$sb.Append([System.Text.Encoding]::ASCII.GetString($buffer, 0, $read))
+                        $stopwatch.Restart()
+                    } else {
+                        Start-Sleep -Milliseconds 100
+                    }
+                }
+
+                $rawResponse = $sb.ToString()
+                Write-Verbose "Received $($rawResponse.Length) characters of PJL response."
+            } finally {
+                if ($stream) {
+                    $stream.Dispose()
+                }
+                if ($tcpClient) {
+                    $tcpClient.Dispose()
+                }
+            }
+
+            return $rawResponse
+        }
+
+        function Get-PrinterModelFromPjl {
+            [CmdletBinding()]
+            param(
+                [Parameter(Mandatory)]
+                [string]$RawResponse
+            )
+
+            $lines = $RawResponse -split "`r?`n" | ForEach-Object { $_.Trim() }
+
+            foreach ($line in $lines) {
+                if ([string]::IsNullOrWhiteSpace($line)) {
+                    continue
+                }
+
+                if ($line -match '^(?:@PJL|UEL|%-12345X)') {
+                    continue
+                }
+
+                if ($line -match '^(?:MODEL|PRODUCT\s+NAME)\s*[:=]\s*(.+)$') {
+                    return $matches[1].Trim()
+                }
+
+                if ($line -match '^"(.+?)"$') {
+                    return $matches[1].Trim()
+                }
+
+                return $line
+            }
+
+            return $null
+        }
+
+        function Test-IsNetworkPrinterPort {
+            [CmdletBinding()]
+            param(
+                [Parameter(Mandatory)]
+                $Port
+            )
+
+            if (-not $Port) {
+                return $false
+            }
+
+            if (-not $Port.PrinterHostAddress) {
+                return $false
+            }
+
+            if (-not $Port.PortNumber -or [int]$Port.PortNumber -le 0) {
+                return $false
+            }
+
+            if ($Port.PrinterHostAddress -match '^(?:nul:|PORTPROMPT:|FILE:|WSD:)$') {
+                return $false
+            }
+
+            return $true
+        }
+
+        foreach ($key in 'Name', 'ComputerName') {
+            if ($PSBoundParameters.ContainsKey($key)) {
+                $printerParams[$key] = $PSBoundParameters[$key]
+            }
         }
     }
 
-    try {
-        $printers = Get-Printer @printerParams -Full
-    } catch {
-        throw "Failed to query printer(s): $($_.Exception.Message)"
-    }
-
-    foreach ($p in $printers) {
-        $model = $null
-        $uri = "https://$($p.PortName)/"
+    process {
+        Write-Verbose 'Querying printer objects from the print server...'
 
         try {
-            $response = Invoke-WebRequest -Uri $uri -SkipCertificateCheck -ErrorAction Stop
-            $match = [regex]::Match($response.Content, $regex)
-
-            if ($match.Success) {
-                $model = $match.Groups['Model'].Value.Trim()
-            }
+            $printers = Get-Printer @printerParams -Full
         } catch {
-            Write-Error "Failed to query printer '$($p.Name)' at '$uri': $($_.Exception.Message)"
+            throw "Get-Printer failed: $($_.Exception.Message)"
         }
 
-        [pscustomobject]@{
-            Name         = $p.Name
-            ComputerName = $p.ComputerName
-            PortName     = $p.PortName
-            Model        = $model
+        $total = @($printers).Count
+
+        if ($total -lt 1) {
+            Write-Progress -Id 1 -Activity 'Get-PrinterInfo' -Status 'No printers found' -PercentComplete 100
+            return
         }
+
+        $index = 0
+        Write-Progress -Id 1 -Activity 'Get-PrinterInfo' -Status "Starting $total printer(s)" -PercentComplete 0
+
+        foreach ($p in $printers) {
+            $index++
+            $printerAddress = $null
+            $portNumber = $PjlPort
+            $model = $null
+            $status = 'Unavailable'
+            $errMsg = $null
+            $modelSource = $null
+
+            $percent = [math]::Round(($index / $total) * 100, 0)
+            Write-Progress -Id 1 -Activity 'Get-PrinterInfo' -Status "Processing $index of $($total): $($p.Name)" -PercentComplete $percent
+
+            Write-Verbose "Processing printer '$($p.Name)' (port: $($p.PortName))."
+
+            try {
+                if (-not $portCache.ContainsKey($p.PortName)) {
+                    Write-Verbose "Resolving printer port '$($p.PortName)'."
+                    try {
+                        $portCache[$p.PortName] = Get-PrinterPort -Name $p.PortName -ErrorAction Stop
+                    } catch {
+                        $portCache[$p.PortName] = $null
+                    }
+                }
+
+                $port = $portCache[$p.PortName]
+
+                if (-not (Test-IsNetworkPrinterPort -Port $port)) {
+                    $status = 'Skipped'
+                    $errMsg = 'Non-network printer port'
+                    Write-Verbose "Skipping '$($p.Name)' because the port is not a network printer port."
+                } else {
+                    $printerAddress = $port.PrinterHostAddress
+                    $portNumber = [int]$port.PortNumber
+
+                    Write-Verbose "Target host is '$printerAddress' on port $portNumber."
+
+                    $esc = [char]27
+                    $commands = @(
+                        @{
+                            Name    = 'PjlInfoId'
+                            Command = "$esc%-12345X@PJL INFO ID`r`n$esc%-12345X`r`n"
+                        },
+                        @{
+                            Name    = 'PjlInfoConfig'
+                            Command = "$esc%-12345X@PJL INFO CONFIG`r`n$esc%-12345X`r`n"
+                        }
+                    )
+
+                    foreach ($cmd in $commands) {
+                        Write-Verbose "Trying $($cmd.Name) for '$($p.Name)'."
+
+                        try {
+                            $rawResponse = Get-PjlResponse -Address $printerAddress -Port $portNumber -PjlCommand $cmd.Command -TimeoutSec $TimeoutSec -Verbose:$VerbosePreference
+                        } catch {
+                            $errMsg = $_.Exception.Message
+                            Write-Verbose "Command $($cmd.Name) failed for '$($p.Name)': $errMsg"
+                            continue
+                        }
+
+                        if ($rawResponse) {
+                            $parsedModel = Get-PrinterModelFromPjl -RawResponse $rawResponse
+
+                            if ($parsedModel) {
+                                $model = $parsedModel
+                                $modelSource = $cmd.Name
+                                $status = 'OK'
+                                $errMsg = $null
+                                Write-Verbose "Model parsed for '$($p.Name)': $model"
+                                break
+                            } else {
+                                Write-Verbose "PJL response returned, but no model was parsed from $($cmd.Name)."
+                            }
+                        } else {
+                            Write-Verbose "No PJL data returned from $($cmd.Name)."
+                        }
+                    }
+
+                    if (-not $model -and -not $errMsg) {
+                        $status = 'ParseFailed'
+                        $errMsg = 'PJL response received, but no model line could be parsed.'
+                        Write-Verbose "Unable to parse a model for '$($p.Name)'."
+                    } elseif (-not $model -and $errMsg) {
+                        $status = 'Failed'
+                        Write-Verbose "Failed to retrieve a model for '$($p.Name)': $errMsg"
+                    }
+                }
+            } catch {
+                $status = 'Failed'
+                $errMsg = $_.Exception.Message
+                Write-Verbose "Unexpected failure for '$($p.Name)': $errMsg"
+            }
+
+            [pscustomobject]@{
+                Name         = $p.Name
+                ComputerName = $p.ComputerName
+                PortName     = $p.PortName
+                Host         = $printerAddress
+                Port         = $portNumber
+                Model        = $model
+                ModelSource  = $modelSource
+                Status       = $status
+                Error        = $errMsg
+            }
+        }
+
+        Write-Progress -Id 1 -Activity 'Get-PrinterInfo' -Completed
     }
 }
