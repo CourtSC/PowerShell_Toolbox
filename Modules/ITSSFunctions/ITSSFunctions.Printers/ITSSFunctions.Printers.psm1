@@ -1617,45 +1617,51 @@ function Set-InitialPrinterConfig {
 function Get-PrinterInfo {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $false, Position = 0)]
+        [Parameter(Position = 0)]
         [string]$Name,
-        [Parameter(Mandatory = $false, Position = 1)]
+
+        [Parameter(Position = 1)]
         [string]$ComputerName
     )
 
-    begin {
-        $params = @{
-            ErrorAction = 'Stop'
-        }
-        $r = '<strong class="product">\s*(?<Model>[^<]+)\s*</strong>'
+    $regex = '<strong class="product">\s*(?<Model>[^<]+)\s*</strong>'
+
+    $printerParams = @{
+        ErrorAction = 'Stop'
     }
-    process {
-        foreach ($key in 'Name', 'ComputerName') {
-            if ($PSBoundParameters.ContainsKey($key)) {
-                $params[$key] = $PSBoundParameters[$key]
-            }
+
+    foreach ($key in 'Name', 'ComputerName') {
+        if ($PSBoundParameters.ContainsKey($key)) {
+            $printerParams[$key] = $PSBoundParameters[$key]
         }
+    }
+
+    try {
+        $printers = Get-Printer @printerParams -Full
+    } catch {
+        throw "Failed to query printer(s): $($_.Exception.Message)"
+    }
+
+    foreach ($p in $printers) {
+        $model = $null
+        $uri = "https://$($p.PortName)/"
 
         try {
-            $printers = Get-Printer @params -Full
-            
-            $output = foreach ($p in $printers) {
-                $response = Invoke-WebRequest -Uri "https://$($p.PortName)/" -SkipCertificateCheck
-                if ($response.Content -match $r) {
-                    $model = $matches.Model
-                }
+            $response = Invoke-WebRequest -Uri $uri -SkipCertificateCheck -ErrorAction Stop
+            $match = [regex]::Match($response.Content, $regex)
 
-                [PSCustomObject]@{
-                    Name         = $p.Name
-                    ComputerName = $p.ComputerName
-                    PortName     = $p.PortName
-                    Model        = $model
-                }
-                                
+            if ($match.Success) {
+                $model = $match.Groups['Model'].Value.Trim()
             }
-        } catch { $_.Exception.Message }        
-    }
-    end {
-        return $output
+        } catch {
+            Write-Error "Failed to query printer '$($p.Name)' at '$uri': $($_.Exception.Message)"
+        }
+
+        [pscustomobject]@{
+            Name         = $p.Name
+            ComputerName = $p.ComputerName
+            PortName     = $p.PortName
+            Model        = $model
+        }
     }
 }
