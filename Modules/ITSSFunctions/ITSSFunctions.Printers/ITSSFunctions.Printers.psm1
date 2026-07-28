@@ -1618,9 +1618,9 @@ function Get-PrinterInfo {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, Position = 0)]
-        [str]$Name,
+        [string]$Name,
         [Parameter(Mandatory = $false, Position = 1)]
-        [str]$ComputerName
+        [string]$ComputerName
     )
 
     begin {
