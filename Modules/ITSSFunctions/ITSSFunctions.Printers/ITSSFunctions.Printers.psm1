@@ -1613,3 +1613,49 @@ function Set-InitialPrinterConfig {
         return $results
     }
 }
+
+function Get-PrinterInfo {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, Position = 0)]
+        [str]$Name,
+        [Parameter(Mandatory = $false, Position = 1)]
+        [str]$ComputerName
+    )
+
+    begin {
+        $params = @{
+            ErrorAction = 'Stop'
+        }
+        $r = '<strong class="product">\s*(?<Model>[^<]+)\s*</strong>'
+    }
+    process {
+        foreach ($key in 'Name', 'ComputerName') {
+            if ($PSBoundParameters.ContainsKey($key)) {
+                $params[$key] = $PSBoundParameters[$key]
+            }
+        }
+
+        try {
+            $printers = Get-Printer @params -Full
+            
+            $output = foreach ($p in $printers) {
+                $response = Invoke-WebRequest -Uri "https://$($p.PortName)/" -SkipCertificateCheck
+                if ($response.Content -match $r) {
+                    $model = $matches.Model
+                }
+
+                [PSCustomObject]@{
+                    Name         = $p.Name
+                    ComputerName = $p.ComputerName
+                    PortName     = $p.PortName
+                    Model        = $model
+                }
+                                
+            }
+        } catch { $_.Exception.Message }        
+    }
+    end {
+        return $output
+    }
+}
